@@ -1,0 +1,344 @@
+<div class="ac-page" [class.ac-dragging]="dragging">
+  <header class="ac-top">
+    <div>
+      <h1>Access Canvas</h1>
+      <p>Drag an identity group, or one identity, onto a service. You choose how access is granted: through an attribute, an existing policy, or a new one. Changes wait in Pending changes until you apply them.</p>
+    </div>
+    <div class="ac-legend" aria-label="Legend">
+      <span><svg width="28" height="8"><path d="M1 4h26" class="lg-dial"/></svg>Dial (use)</span>
+      <span><svg width="28" height="8"><path d="M1 4h26" class="lg-bind"/></svg>Bind (host)</span>
+      <span><svg width="28" height="8"><path d="M1 4h26" class="lg-dial lg-byname"/></svg>By name (&#64;)</span>
+      <span><svg width="28" height="8"><path d="M1 4h26" class="lg-pending"/></svg>Pending</span>
+    </div>
+  </header>
+
+  @if (loading) {
+    <div class="ac-empty">Loading identities, services, routers and policies…</div>
+  } @else if (loadError) {
+    <div class="ac-empty ac-bad">Couldn't load the network: {{ loadError }} <button type="button" class="ac-linkish" (click)="reload()">Try again</button></div>
+  } @else {
+
+  <!-- Getting started -->
+  <section class="ac-guide" aria-label="Getting started">
+    <div class="ac-guide-h">
+      <div>
+        <h2>Getting started</h2>
+        <p>{{ guideDone }} of {{ guide.length }} done
+          @if (nextGuide) { · next: {{ nextGuide.t | lowercase }} } @else { · your network is ready }</p>
+      </div>
+      <div class="ac-progress" role="progressbar" aria-label="Getting started progress" aria-valuemin="0" [attr.aria-valuemax]="guide.length" [attr.aria-valuenow]="guideDone">
+        <span [style.width.%]="guide.length ? (guideDone / guide.length) * 100 : 0"></span>
+      </div>
+      <button type="button" class="ac-icon-btn" (click)="toggleGuide()" [attr.aria-expanded]="guideOpen">{{ guideOpen ? 'Hide' : 'Show' }}</button>
+    </div>
+    @if (guideOpen) {
+      <ol class="ac-gsteps">
+        @for (s of guide; track s.id) {
+          <li [class.done]="s.done" [class.next]="s === nextGuide">
+            <span class="ac-tick" aria-hidden="true">{{ s.done ? '✓' : '' }}</span>
+            <div>
+              <b>{{ s.t }}</b>@if (s.done) {<span class="ac-sr"> (done)</span>}
+              <div class="ac-small">{{ s.d }}</div>
+              @if (!s.done && (s.link || s.action)) {
+                <div class="ac-acts">
+                  @if (s.link) { <button type="button" class="ac-btn" (click)="go(s.link.route)">{{ s.link.label }}</button> }
+                  @if (s.action === 'allow-routers' && !readOnly) {
+                    <button type="button" class="ac-btn" (click)="allowAllRouters()">Allow all identities on all routers</button>
+                    <span class="ac-small">Creates edge router policy <code>#all → #all</code>, the usual start. Narrow it later.</span>
+                  }
+                </div>
+              }
+            </div>
+          </li>
+        }
+      </ol>
+    }
+  </section>
+
+  <div class="ac-toolbar">
+    <label class="ac-filter" for="ac-filter"><span aria-hidden="true">#</span>
+      <input id="ac-filter" type="search" placeholder="Filter attributes, identities, services" autocomplete="off" [(ngModel)]="filter" (ngModelChange)="onFilter()">
+    </label>
+    @if (readOnly) {
+      <div class="ac-ro">Read-only: your role can't change identities or policies. You can explore and use the advisor.</div>
+    }
+    <button type="button" class="ac-btn" (click)="reload()" [disabled]="busy">Refresh</button>
+  </div>
+
+  <!-- Flow -->
+  <section class="ac-flow-scroll" aria-label="Access flow">
+    <div class="ac-flow" #flow (mouseover)="focusCard($event)" (mouseleave)="unfocus()" (focusin)="focusCard($event)" (focusout)="unfocus()">
+      <svg #edges class="ac-edges" aria-hidden="true"></svg>
+
+      <!-- Identity groups -->
+      <div class="ac-col">
+        <ng-container *ngTemplateOutlet="colHead; context: {t: 'Identity groups', d: 'Grouped by role attribute. Drag a group, or show it and drag one identity.', c: 'identities'}"></ng-container>
+        @for (g of idGroups; track g.key) {
+          <div class="ac-card" [attr.data-node]="g.key">
+            <div class="ac-card-h" [attr.draggable]="g.attr && !readOnly ? 'true' : null" (dragstart)="onDragStart($event, srcOf('group', g.attr))" (dragend)="onDragEnd()">
+              @if (g.attr && !readOnly) { <span class="ac-grip" aria-hidden="true">⠿</span> }
+              @if (g.attr) { <span class="ac-attr">#{{ g.attr }}</span> } @else { <span class="ac-attr ac-muted">no attributes</span> }
+              <span class="ac-count">{{ plural(g.members.length, 'identity', 'identities') }}</span>
+              <button type="button" class="ac-icon-btn" (click)="toggleGroup(g.key)" [attr.aria-expanded]="g.open">{{ g.open ? 'Hide' : 'Show' }}</button>
+            </div>
+            <div class="ac-badges">
+              <span class="ac-badge" [class.bad]="!g.services">{{ plural(g.services || 0, 'service', 'services') }}</span>
+              @if (!g.unrouted) { <span class="ac-badge ok">routers ok</span> } @else { <span class="ac-badge bad">{{ g.unrouted }} without routers</span> }
+              @if (g.unenrolled) { <span class="ac-badge info">{{ g.unenrolled }} not enrolled</span> }
+              @if (g.attr && !readOnly) { <button type="button" class="ac-icon-btn" (click)="openGrant(srcOf('group', g.attr), null)">Give access…</button> }
+            </div>
+            @if (g.open) {
+              <div class="ac-card-b">
+                @for (i of g.shown; track i.id) {
+                  <div class="ac-row" [attr.draggable]="readOnly ? null : 'true'" (dragstart)="onDragStart($event, srcOf('identity', i.id))" (dragend)="onDragEnd()">
+                    @if (!readOnly) { <span class="ac-grip" aria-hidden="true">⠿</span> }
+                    <button type="button" class="ac-name" (click)="pickIdentity(i.id)" title="Check access in the advisor">{{ i.name }}</button>
+                    <span class="ac-end">
+                      @if (!i.enrolled) { <span class="ac-badge info">not enrolled</span> }
+                      @for (x of otherAttrs(i, g.attr); track x) { <span class="ac-chip" [class.pending]="marks.has('attr:' + i.id + ':' + x)">#{{ x }}</span> }
+                      @if (!readOnly) { <button type="button" class="ac-icon-btn" (click)="openGrant(srcOf('identity', i.id), null)" [attr.aria-label]="'Give ' + i.name + ' access'">+</button> }
+                    </span>
+                  </div>
+                }
+                @if (g.more) { <div class="ac-more">+{{ g.more }} more. Filter to find one, or drag the whole group.</div> }
+              </div>
+            }
+          </div>
+        } @empty {
+          <div class="ac-empty-col">No identities yet. <button type="button" class="ac-linkish" (click)="go('/identities/create')">Create an identity</button></div>
+        }
+      </div>
+
+      <!-- Dial policies -->
+      <div class="ac-col">
+        <ng-container *ngTemplateOutlet="colHead; context: {t: 'Dial policies', d: 'Who may use which services', c: 'dial'}"></ng-container>
+        @for (p of dials; track p.id) { <ng-container *ngTemplateOutlet="polCard; context: {p: p}"></ng-container> }
+        @empty { <div class="ac-empty-col">None yet. Drag an identity group onto a service and one is suggested for you.</div> }
+      </div>
+
+      <!-- Services -->
+      <div class="ac-col">
+        <ng-container *ngTemplateOutlet="colHead; context: {t: 'Services', d: 'Drop here to grant access', c: 'services'}"></ng-container>
+        @for (g of svcGroups; track g.key) {
+          <div class="ac-card ac-drop" [attr.data-node]="g.key" [class.over]="overKey === g.key"
+               (dragover)="g.attr ? onDragOver($event, g.key) : null" (dragleave)="overKey = ''" (drop)="g.attr ? onDrop($event, {kind: 'group', attr: g.attr}) : null">
+            <div class="ac-card-h">
+              @if (g.attr) { <span class="ac-attr">#{{ g.attr }}</span> } @else { <span class="ac-attr ac-muted">no attributes</span> }
+              <span class="ac-count">{{ plural(g.members.length, 'service', 'services') }}</span>
+            </div>
+            <div class="ac-card-b">
+              @for (s of g.members; track s.id) {
+                <div class="ac-row ac-drop" [class.over]="overKey === g.key + '/' + s.id"
+                     (dragover)="onDragOver($event, g.key + '/' + s.id)" (drop)="onDrop($event, {kind: 'service', id: s.id})">
+                  <button type="button" class="ac-name" (click)="pickService(s.id)" title="Check access in the advisor">{{ s.name }}</button>
+                  <span class="ac-end">
+                    @if (hostCount(s)) { <span class="ac-badge ok">{{ plural(hostCount(s), 'host', 'hosts') }}</span> } @else { <span class="ac-badge bad">not hosted</span> }
+                  </span>
+                </div>
+              }
+            </div>
+          </div>
+        } @empty {
+          <div class="ac-empty-col">No services yet. <button type="button" class="ac-linkish" (click)="go('/services/simple')">Add one in Simple Service</button></div>
+        }
+        @if (svcGroups.length) { <p class="ac-hint">Drop on a group header to grant the whole group, or on one service.</p> }
+      </div>
+
+      <!-- Bind policies -->
+      <div class="ac-col">
+        <ng-container *ngTemplateOutlet="colHead; context: {t: 'Bind policies', d: 'Who hosts which services', c: 'bind'}"></ng-container>
+        @for (p of binds; track p.id) { <ng-container *ngTemplateOutlet="polCard; context: {p: p}"></ng-container> }
+        @empty { <div class="ac-empty-col">Created for you when Simple Service adds a host.</div> }
+      </div>
+
+      <!-- Hosts -->
+      <div class="ac-col">
+        <ng-container *ngTemplateOutlet="colHead; context: {t: 'Hosting identities', d: 'The far end of each service', c: 'hosts'}"></ng-container>
+        @for (g of hostGroups; track g.key) {
+          <div class="ac-card" [attr.data-node]="g.key">
+            <div class="ac-card-h">
+              @if (g.attr) { <span class="ac-attr">#{{ g.attr }}</span> } @else { <span class="ac-attr ac-muted">no attributes</span> }
+              <span class="ac-count">{{ plural(g.members.length, 'host', 'hosts') }}</span>
+            </div>
+            <div class="ac-card-b">
+              @for (h of g.members; track h.id) {
+                <div class="ac-row"><span>{{ h.name }}</span><span class="ac-end">@if (!h.enrolled) { <span class="ac-badge info">not enrolled</span> }</span></div>
+              }
+            </div>
+          </div>
+        } @empty { <div class="ac-empty-col">None yet. A hosting identity runs next to the real server.</div> }
+      </div>
+    </div>
+  </section>
+
+  <!-- Routers -->
+  <section class="ac-band" aria-labelledby="ac-band-h">
+    <div class="ac-band-head">
+      <h2 id="ac-band-h">Edge routers <button type="button" class="ac-q" (click)="toggleConcept('routers')" [attr.aria-expanded]="shownConcepts.has('routers')" aria-label="What is this?">?</button></h2>
+      <p>An identity needs a router it's allowed on <em>and</em> that carries the service. Dial alone isn't enough.</p>
+    </div>
+    @if (shownConcepts.has('routers')) { <p class="ac-concept">{{ concepts['routers'] }}</p> }
+    <div class="ac-band-grid">
+      @if (!erPolicies.length) {
+        <div class="ac-empty-col">No edge router policies, so no identity may use any router.
+          @if (!readOnly) { <button type="button" class="ac-linkish" (click)="allowAllRouters()">Allow all identities on all routers</button> }</div>
+      }
+      @for (p of erPolicies; track p.id) {
+        <div class="ac-card ac-pol er" [class.pending-card]="marks.has('policy:' + p.id)">
+          <div class="ac-card-h"><span class="ac-pname">{{ p.name }}</span><span class="ac-sem">edge router policy</span></div>
+          <div class="ac-roles"><span>who</span><span class="ac-chips">@for (r of p.identityRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'">{{ role(r) }}</span> }</span>
+            <span>routers</span><span class="ac-chips">@for (r of p.routerRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'">{{ role(r) }}</span> }</span></div>
+        </div>
+      }
+      @for (p of serps; track p.id) {
+        <div class="ac-card ac-pol er">
+          <div class="ac-card-h"><span class="ac-pname">{{ p.name }}</span><span class="ac-sem">service edge router policy</span></div>
+          <div class="ac-roles"><span>services</span><span class="ac-chips">@for (r of p.serviceRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'">{{ role(r) }}</span> }</span>
+            <span>routers</span><span class="ac-chips">@for (r of p.routerRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'">{{ role(r) }}</span> }</span></div>
+        </div>
+      }
+      @for (g of routerGroups; track g[0]) {
+        <div class="ac-card">
+          <div class="ac-card-h">@if (g[0]) { <span class="ac-attr ac-router">#{{ g[0] }}</span> } @else { <span class="ac-attr ac-muted">no attributes</span> }
+            <span class="ac-count">{{ plural(g[1].length, 'router', 'routers') }}</span></div>
+          <div class="ac-card-b">@for (r of g[1]; track r.id) {
+            <div class="ac-row"><span>{{ r.name }}</span><span class="ac-end"><span class="ac-badge" [class.ok]="r.online" [class.bad]="!r.online">{{ r.online ? 'online' : 'offline' }}</span></span></div>
+          }</div>
+        </div>
+      }
+    </div>
+  </section>
+
+  <!-- Advisor + pending -->
+  <section class="ac-panels">
+    <div class="ac-panel">
+      <h2>Why can't they connect?</h2>
+      <p>Checks every piece OpenZiti needs for one identity to reach one service, and names the missing one.</p>
+      @if (!advisorIdentity || !advisorService) {
+        <div class="ac-empty">Add at least one identity and one service, and the advisor will check the path between them.</div>
+      } @else {
+        <div class="ac-pick">
+          <label for="ac-adv-id">Identity
+            <select id="ac-adv-id" [(ngModel)]="advisorI" (ngModelChange)="runAdvisor()">
+              @for (g of advisorClients; track g.key) {
+                <optgroup [label]="g.attr ? '#' + g.attr : 'no attributes'">@for (i of g.members; track i.id) { <option [value]="i.id">{{ i.name }}</option> }</optgroup>
+              }
+            </select></label>
+          <span class="ac-arrow">→</span>
+          <label for="ac-adv-svc">Service
+            <select id="ac-adv-svc" [(ngModel)]="advisorS" (ngModelChange)="runAdvisor()">
+              @for (s of draft?.services; track s.id) { <option [value]="s.id">{{ s.name }}</option> }
+            </select></label>
+        </div>
+        <div class="ac-verdict" [class.ok]="!adviceFail" [class.bad]="adviceFail">
+          @if (adviceFail) { ✕ {{ advisorIdentity.name }} can't reach {{ advisorService.name }}: {{ adviceFail.t | lowercase }} }
+          @else { ✓ {{ advisorIdentity.name }} can reach {{ advisorService.name }}@if (advicePosture) { (after the posture check)} }
+        </div>
+        <ol class="ac-steps">
+          @for (x of advice; track $index) {
+            <li [class]="x.st"><span class="ac-mark">{{ x.st === 'ok' ? '✓' : x.st === 'bad' ? '✕' : '!' }}</span>
+              <div><b>{{ x.t }}</b>@if (x.d) {<div class="ac-detail">{{ x.d }}</div>}@if (x.fix) {<div class="ac-fix">Fix: {{ x.fix }}</div>}</div></li>
+          }
+        </ol>
+        @if (!adviceFail) { <button type="button" class="ac-btn" (click)="openIdentity()">Open {{ advisorIdentity.name }} (Identity Service Path is there)</button> }
+      }
+    </div>
+
+    <div class="ac-panel">
+      <h2>Pending changes</h2>
+      <p>Drops build a change set here first. Nothing is sent to the controller until you apply.</p>
+      @for (c of pending; track c.id) {
+        <div class="ac-change">
+          <div class="ac-change-h"><div><b>{{ c.title }}</b><div class="ac-small">{{ c.summary }}</div></div>
+            <button type="button" class="ac-icon-btn" (click)="discard(c.id)" [disabled]="busy">Discard</button></div>
+          <details class="ac-api"><summary>{{ plural(c.calls.length, 'API call', 'API calls') }}</summary><pre>{{ c.calls.join('\n\n') }}</pre></details>
+        </div>
+      } @empty {
+        <div class="ac-empty">No pending changes. Drag an identity group onto a service to start, or use “Give access…” on a group.</div>
+      }
+      <div class="ac-btns">
+        <button type="button" class="ac-btn primary" (click)="applyAll()" [disabled]="!pending.length || readOnly || busy">
+          {{ busy ? 'Working…' : pending.length ? 'Apply ' + plural(pending.length, 'change', 'changes') + ' (' + plural(pendingCalls, 'call', 'calls') + ')' : 'Apply changes' }}</button>
+        <button type="button" class="ac-btn" (click)="discardAll()" [disabled]="!pending.length || busy">Discard all</button>
+        <button type="button" class="ac-btn" (click)="undoLast()" [disabled]="!history.length || busy">Undo last apply</button>
+      </div>
+      @if (history.length) { <div class="ac-small">{{ plural(history.length, 'applied change set', 'applied change sets') }} can be undone in this session.</div> }
+    </div>
+  </section>
+  }
+</div>
+
+<!-- Grant dialog -->
+@if (dialog) {
+  <div class="ac-backdrop" (click)="closeGrant()"></div>
+  <div class="ac-dialog" role="dialog" aria-modal="true" aria-labelledby="ac-grant-title" (keydown.escape)="closeGrant()">
+    @if (!dialog.result) {
+      <h2 id="ac-grant-title">Give {{ dialogSourceLabel }} access</h2>
+    } @else {
+      <h2 id="ac-grant-title">How should {{ dialog.result.srcLabel }} get {{ dialog.result.tgtLabel }}?</h2>
+      <div class="ac-route"><span class="ac-chip">{{ dialog.result.srcLabel }}</span><span>{{ plural(dialog.result.srcCount, 'identity', 'identities') }}</span>
+        <span>→ dial →</span><span class="ac-chip">{{ dialog.result.tgtLabel }}</span><span>{{ plural(dialog.result.tgtCount, 'service', 'services') }}</span></div>
+    }
+    <label class="ac-field" for="ac-grant-target">Service or service group
+      <select id="ac-grant-target" [(ngModel)]="dialogTarget" (ngModelChange)="onTargetChange()">
+        @if (!dialog.tgt) { <option value="">Choose…</option> }
+        <optgroup label="Service groups">@for (t of targetChoices; track t.value) { @if (t.group === 'Service groups') { <option [value]="t.value">{{ t.label }}</option> } }</optgroup>
+        <optgroup label="Services">@for (t of targetChoices; track t.value) { @if (t.group === 'Services') { <option [value]="t.value">{{ t.label }}</option> } }</optgroup>
+      </select>
+    </label>
+    @if (dialog.result; as r) {
+      <p class="ac-lede">OpenZiti grants access through attribute-based policies. Pick the change that matches your intent. Nothing is sent until you apply it in Pending changes.</p>
+      @if (r.unhosted.length) {
+        <div class="ac-warnbox">{{ r.unhosted.join(', ') }} {{ r.unhosted.length === 1 ? 'has' : 'have' }} no hosting identity. Access will be granted, but connections won't complete until a Bind policy exists.</div>
+      }
+      @if (r.already) {
+        <div class="ac-already">✓ Already allowed by {{ r.allowedBy.join(', ') }}. Nothing to change.</div>
+        <div class="ac-btns"><button type="button" class="ac-btn" (click)="closeGrant()">Close</button></div>
+      } @else {
+        <fieldset class="ac-opts"><legend class="ac-lede">Options</legend>
+          @for (o of r.opts; track $index) {
+            <label class="ac-opt" [class.sel]="dialog.selected === $index">
+              <input type="radio" name="ac-grant-opt" [value]="$index" [(ngModel)]="dialog.selected">
+              <div>
+                <div class="ac-opt-t">{{ o.title }} @if (o.recommended) { <span class="ac-rec">Recommended</span> } @if (o.exception) { <span class="ac-exc">Exception</span> }</div>
+                <div class="ac-small">{{ o.why }}</div>
+                <div class="ac-imp">{{ impactText(o) }}</div>
+                @if (o.impact.outside.length) { <div class="ac-warn">Also grants: {{ o.impact.outside.join(', ') }}</div> }
+                @if (o.impact.noRoute) { <div class="ac-warn">{{ o.impact.noRoute }} of them can't reach a router for it yet (no edge router policy).</div> }
+                <details class="ac-api"><summary>{{ plural(o.calls.length, 'API call', 'API calls') }}</summary><pre>{{ o.calls.join('\n\n') }}</pre></details>
+              </div>
+            </label>
+          }
+        </fieldset>
+        <div class="ac-btns">
+          <button type="button" class="ac-btn primary" (click)="queueSelected()">Add to pending changes</button>
+          <button type="button" class="ac-btn" (click)="closeGrant()">Cancel</button>
+        </div>
+      }
+    } @else {
+      <div class="ac-btns"><button type="button" class="ac-btn" (click)="closeGrant()">Cancel</button></div>
+    }
+  </div>
+}
+
+<ng-template #colHead let-t="t" let-d="d" let-c="c">
+  <div class="ac-col-head">
+    <h2>{{ t }} <button type="button" class="ac-q" (click)="toggleConcept(c)" [attr.aria-expanded]="shownConcepts.has(c)" aria-label="What is this?">?</button></h2>
+    <p>{{ d }}</p>
+    @if (shownConcepts.has(c)) { <p class="ac-concept">{{ concepts[c] }}</p> }
+  </div>
+</ng-template>
+
+<ng-template #polCard let-p="p">
+  <div class="ac-card ac-pol" [class.bind]="p.type === 'Bind'" [class.pending-card]="marks.has('policy:' + p.id)"
+       [attr.data-node]="(p.type === 'Dial' ? 'dp:' : 'bp:') + p.id" [attr.data-policy]="p.id" tabindex="0">
+    <div class="ac-card-h"><span class="ac-pname">{{ p.name }}</span><span class="ac-sem">{{ p.semantic }}</span>
+      @for (x of p.posture; track x) { <span class="ac-posture">posture: {{ x }}</span> }</div>
+    <div class="ac-roles">
+      <span>{{ p.type === 'Dial' ? 'who' : 'hosts' }}</span>
+      <span class="ac-chips">@for (r of p.identityRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'" [class.pending]="marks.has('role:' + p.id + ':' + r)">{{ role(r) }}</span> }</span>
+      <span>{{ p.type === 'Dial' ? 'dials' : 'binds' }}</span>
+      <span class="ac-chips">@for (r of p.serviceRoles; track r) { <span class="ac-chip" [class.name-ref]="r[0] === '@'">{{ role(r) }}</span> }</span>
+    </div>
+  </div>
+</ng-template>
