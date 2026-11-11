@@ -27,8 +27,9 @@ import {
 } from './access-canvas.logic';
 import {
     Board, BoardFilters, Clip, ClipItem, IntentResult, buildBoard, emptyLayout, freeKey, groupKey, marksFor, moveMember,
-    pasteAsNew, pasteIntoGroup, pasteOntoEntities, removeFromGroups, sameLayout,
+    pasteAsNew, pasteIntoGroup, pasteOntoEntities, remapLayout, removeFromGroups,
 } from './canvas-board.logic';
+import {LayoutStore, layoutFile, parseLayout} from './canvas-layout.store';
 import {BoardCommand, CanvasBoardComponent, MemberDrop, NodeDrop, SelItem} from './canvas-board.component';
 import {AccessWizardComponent} from './access-wizard.component';
 import {WizardPlan} from './access-wizard.logic';
@@ -64,7 +65,6 @@ const POLICY_LABEL: Record<string, string> = {dial: 'Dial policy', bind: 'Bind p
 const POLICY_ROUTE: Record<string, string> = {dial: '/service-policies', bind: '/service-policies', erp: '/router-policies', serp: '/service-router-policies'};
 const ENTITY_ROUTE: Record<AcKind, string> = {identity: '/identities', service: '/services', router: '/routers'};
 
-const LAYOUT_SET = 'layout';
 const KINDS: AcKind[] = ['identity', 'service', 'router'];
 
 @Component({
@@ -85,16 +85,16 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
     busy = false;
     loadError = '';
     readOnly = false;
-    canSaveLayout = true;
 
     committed: AcModel | null = null;
     draft: AcModel | null = null;
     pending: Pending[] = [];
     history: Applied[] = [];
 
-    layoutCommitted: AcLayout = emptyLayout();
+    /** Card positions and empty groups. Kept in this browser as soon as they change; never sent to the controller. */
     layoutDraft: AcLayout = emptyLayout();
-    movedKeys = new Set<string>();
+    private layoutStore!: LayoutStore;
+    layoutMenu = false;
 
     filters: BoardFilters = {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false};
     filterMenu = false;
@@ -144,7 +144,8 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
 
     ngOnInit(): void {
         this.readOnly = !this.svc.canEdit();
-        this.canSaveLayout = this.svc.canSaveLayout();
+        this.layoutStore = this.svc.layoutStore();
+        this.layoutDraft = this.layoutStore.load() || emptyLayout();
         this.reload();
     }
 
@@ -154,11 +155,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         this.loadError = '';
         let stage = 'loading the network';
         try {
-            const [model, layout] = await Promise.all([this.svc.load(), this.svc.loadLayout()]);
-            this.committed = model;
-            this.layoutCommitted = layout;
-            // Keep unsaved moves across a refresh; otherwise follow what's saved.
-            if (!this.pending.some(p => p.id === LAYOUT_SET)) this.layoutDraft = clone(layout);
+            this.committed = await this.svc.load();
             stage = 'drawing the canvas';
             this.refresh();
         } catch (err) {
@@ -185,10 +182,6 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         const m = this.draft = this.pending.reduce((acc, c) => applyOps(acc, c.ops), clone(this.committed));
         this.board = buildBoard(m, {layout: this.layoutDraft, filters: this.filters, marks: marksFor(this.pending.map(p => p.ops)), expanded: this.expanded});
         this.collectProblems(m);
-        this.movedKeys = new Set(Object.keys(this.layoutDraft.nodes).filter(k => {
-            const a = this.layoutDraft.nodes[k], b = this.layoutCommitted.nodes[k];
-            return !b || a.x !== b.x || a.y !== b.y;
-        }));
         this.advisorClients = groups(clients(m)).map(([attr, members]) => ({attr, members}));
         this.runAdvisor();
     }
@@ -309,50 +302,82 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         if (n) this.boardCmp?.reveal(n.key);
     }
 
-    // ------------------------------------------------------------------ layout (saved on apply)
+    // ------------------------------------------------------------------ layout (kept in this browser)
     onMoved(moves: { key: string; x: number; y: number }[]): void {
         if (this.readOnly || !this.committed) return;
         // First move: freeze every automatic position so nothing else jumps around.
         if (Object.keys(this.layoutDraft.nodes).length === 0 || moves.some(mv => !this.layoutDraft.nodes[mv.key])) {
-            const all = buildBoard(this.draft!, {
-                layout: this.layoutDraft, marks: marksFor([]), expanded: this.expanded,
-                filters: {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false},
-            });
-            for (const n of all.nodes) if (!this.layoutDraft.nodes[n.key]) this.layoutDraft.nodes[n.key] = {x: n.x, y: n.y};
+            this.layoutDraft = this.positionsNow();
         }
         for (const mv of moves) this.layoutDraft.nodes[mv.key] = {x: mv.x, y: mv.y};
-        this.syncLayoutPending();
+        this.saveLayout();
+    }
+
+    /** The layout with every item placed: saved positions plus the automatic ones. */
+    private positionsNow(): AcLayout {
+        const out = clone(this.layoutDraft);
+        if (!this.draft) return out;
+        const all = buildBoard(this.draft, {
+            layout: this.layoutDraft, marks: marksFor([]), expanded: this.expanded,
+            filters: {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false},
+        });
+        for (const n of all.nodes) if (!out.nodes[n.key]) out.nodes[n.key] = {x: n.x, y: n.y};
+        return out;
     }
 
     autoArrange(): void {
+        this.layoutMenu = false;
         this.layoutDraft = {v: 1, nodes: {}, groups: [...(this.layoutDraft.groups || [])]};
-        this.syncLayoutPending();
+        this.saveLayout();
         requestAnimationFrame(() => this.boardCmp?.fit());
     }
 
-    private syncLayoutPending(): void {
-        const i = this.pending.findIndex(p => p.id === LAYOUT_SET);
-        if (sameLayout(this.layoutDraft, this.layoutCommitted)) {
-            if (i >= 0) this.pending.splice(i, 1);
-        } else {
-            const moved = Object.keys(this.layoutDraft.nodes).filter(k => {
-                const a = this.layoutDraft.nodes[k], b = this.layoutCommitted.nodes[k];
-                return !b || a.x !== b.x || a.y !== b.y;
-            }).length;
-            const newGroups = (this.layoutDraft.groups || []).filter(g => !(this.layoutCommitted.groups || []).includes(g));
-            const ops: AcOp[] = [{op: 'saveLayout', layout: clone(this.layoutDraft)}];
-            const set: Pending = {
-                id: LAYOUT_SET, title: 'Save canvas layout',
-                summary: [
-                    Object.keys(this.layoutDraft.nodes).length ? `${this.plural(moved, 'position', 'positions')} changed` : 'Back to automatic layout',
-                    newGroups.length ? `new group${newGroups.length > 1 ? 's' : ''} ${newGroups.map(g => '#' + g.split(':').slice(1).join(':')).join(', ')}` : '',
-                    this.canSaveLayout ? 'shared with other admins through a config on the controller' : "your role can't save configs, so applying this will fail",
-                ].filter(Boolean).join('; ') + '.',
-                ops, calls: describeCalls(this.draft || this.committed!, ops),
-            };
-            if (i >= 0) this.pending[i] = set; else this.pending.push(set);
-        }
+    /** Layout is presentation only, so it's kept at once rather than queued as a pending change. */
+    private saveLayout(): void {
+        this.layoutStore.save(this.layoutDraft);
         this.refresh();
+    }
+
+    /** Downloads the current arrangement as JSON, e.g. to share it with another admin. */
+    exportLayout(): void {
+        this.layoutMenu = false;
+        const controller = this.svc.controllerName();
+        const json = JSON.stringify(layoutFile(this.positionsNow(), controller), null, 2);
+        const host = (controller.replace(/^https?:\/\//, '').split(/[/:]/)[0] || 'controller').replace(/[^a-z0-9.-]/gi, '_');
+        const url = URL.createObjectURL(new Blob([json], {type: 'application/json'}));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `access-canvas-layout-${host}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    /** Replaces the arrangement with one from an exported file. */
+    async importLayout(ev: Event): Promise<void> {
+        const input = ev.target as HTMLInputElement;
+        const file = input.files?.[0];
+        input.value = '';
+        this.layoutMenu = false;
+        if (!file) return;
+        let data: any = null;
+        try { data = JSON.parse(await file.text()); } catch { /* reported below */ }
+        const layout = parseLayout(data);
+        if (!layout) {
+            this.toast('warning', 'Not imported', "That file isn't an Access Canvas layout. Use a file made with Export layout.");
+            this.cdr.markForCheck();
+            return;
+        }
+        const known = new Set(Object.keys(this.positionsNow().nodes));
+        const matched = Object.keys(layout.nodes).filter(k => known.has(k)).length;
+        this.layoutDraft = layout;
+        this.saveLayout();
+        requestAnimationFrame(() => this.boardCmp?.fit());
+        const from = typeof data.controller === 'string' && data.controller && data.controller !== this.svc.controllerName()
+            ? ` It was exported from ${data.controller}; items that don't exist here are placed automatically.` : '';
+        this.toast('success', 'Layout imported', `${this.plural(matched, 'item', 'items')} placed from ${file.name}.${from}`);
+        this.cdr.markForCheck();
     }
 
     // ------------------------------------------------------------------ board events
@@ -483,7 +508,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
             res = r;
         }
         if (this.queueIntent(res) && this.clip.mode === 'cut') this.clip = null;
-        if (Object.keys(this.layoutDraft.nodes).some(k => !this.layoutCommitted.nodes[k])) this.syncLayoutPending();
+        this.layoutStore.save(this.layoutDraft);   // positions of pasted free cards
     }
 
     private deleteSelection(items: SelItem[]): void {
@@ -496,7 +521,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         if (emptyNew.length) {
             this.layoutDraft.groups = (this.layoutDraft.groups || []).filter(g => !emptyNew.some(i => g === `${i.kind}:${i.attr}`));
             emptyNew.forEach(i => delete this.layoutDraft.nodes[i.node]);
-            this.syncLayoutPending();
+            this.saveLayout();
             return;
         }
         this.toast('info', 'Nothing removed', 'Delete takes selected cards out of their group. A group disappears when nothing uses it; identities and services are never deleted here.');
@@ -514,7 +539,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         } else {
             this.layoutDraft.groups = [...(this.layoutDraft.groups || []), id];
             this.layoutDraft.nodes[groupKey(g.kind, attr)] = {x: Math.round(g.at.x), y: Math.round(g.at.y)};
-            this.syncLayoutPending();
+            this.saveLayout();
         }
         this.newGroup = null;
     }
@@ -610,9 +635,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
     private queue(title: string, summary: string, ops: AcOp[], next?: string[]): void {
         if (!this.draft) return;
         const set: Pending = {id: 'c' + this.seq++, title, summary, ops, calls: describeCalls(this.draft, ops), next};
-        // Access changes go before the layout save, which always runs last.
-        const li = this.pending.findIndex(p => p.id === LAYOUT_SET);
-        if (li >= 0) this.pending.splice(li, 0, set); else this.pending.push(set);
+        this.pending.push(set);
         this.refresh();
         this.pulse = false;
         clearTimeout(this.pulseTimer);
@@ -634,20 +657,18 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
     dismissFollowUp(i: number): void { this.followUps.splice(i, 1); }
 
     discard(id: string): void {
-        if (id === LAYOUT_SET) this.layoutDraft = clone(this.layoutCommitted);
         this.pending = this.pending.filter(c => c.id !== id);
         this.refresh();
     }
     discardAll(): void {
         this.pending = [];
-        this.layoutDraft = clone(this.layoutCommitted);
         this.refresh();
     }
 
     async applyAll(): Promise<void> {
         if (!this.committed || !this.pending.length || this.readOnly || this.busy) return;
         this.busy = true;
-        const sets = [...this.pending.filter(p => p.id !== LAYOUT_SET), ...this.pending.filter(p => p.id === LAYOUT_SET)];
+        const sets = [...this.pending];
         const idMap = new Map<string, string>();
         let done = 0;
         try {
@@ -665,6 +686,11 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
                     this.toast('error', 'Change not applied', `${c.title}: ${this.svc.errorText(err)}. Nothing from this change set was kept.`);
                     break;
                 }
+            }
+            // Positions of new items were stored under temporary ids: move them to the real ones.
+            if (idMap.size) {
+                this.layoutDraft = remapLayout(this.layoutDraft, idMap);
+                this.layoutStore.save(this.layoutDraft);
             }
             if (done) this.toast('success', 'Applied', `${this.plural(done, 'change set', 'change sets')} sent to the controller.`);
             if (done && this.followUps.length) this.drawer = 'pending';

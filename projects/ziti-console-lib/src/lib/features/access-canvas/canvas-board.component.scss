@@ -42,7 +42,6 @@ lib-canvas-board:has(.ab-node.hot) .ab-edges path:not(.hot) { opacity: .15; }
   &.drop { outline: 2px dashed var(--ac-ok); outline-offset: 3px; background: var(--ac-ok-soft); }
   &.dim { opacity: .35; }
   &.hit { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac-pending) 45%, transparent), var(--ac-shadow); }
-  &.moved::after { content: ''; position: absolute; top: -5px; right: -5px; width: 9px; height: 9px; border-radius: 50%; background: var(--ac-pending); }
   :focus-visible { outline: 2px solid var(--ac-dial); outline-offset: -2px; }
 }
 lib-canvas-board:has(.ab-node.hot) .ab-node:not(.hot) { opacity: .45; }

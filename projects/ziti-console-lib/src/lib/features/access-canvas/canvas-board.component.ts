@@ -70,8 +70,6 @@ export class CanvasBoardComponent implements OnChanges, OnDestroy {
     @Input() board: Board = {nodes: [], edges: []};
     @Input() readOnly = false;
     @Input() hasClip = false;
-    /** Keys of nodes positioned by a pending layout change. */
-    @Input() movedKeys = new Set<string>();
 
     @Output() moved = new EventEmitter<{ key: string; x: number; y: number }[]>();
     @Output() memberDrop = new EventEmitter<MemberDrop>();

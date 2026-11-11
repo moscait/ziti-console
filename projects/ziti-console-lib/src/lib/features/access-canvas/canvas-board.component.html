@@ -11,7 +11,7 @@
           <section class="ab-node ab-group" [attr.data-kind]="n.kind" data-drop [attr.data-node]="n.key"
                    [style.left.px]="n.x" [style.top.px]="n.y" [style.width.px]="n.w" [style.height.px]="n.h"
                    [class.sel]="selected.has(n.key)" [class.hot]="hot.has(n.key)" [class.dim]="n.dim"
-                   [class.drop]="dropKey === n.key" [class.pending]="n.pending" [class.moved]="movedKeys.has(n.key)"
+                   [class.drop]="dropKey === n.key" [class.pending]="n.pending"
                    [class.hit]="n.hit && !n.dim"
                    (pointerdown)="onNodeDown($event, n)" (contextmenu)="onContext($event, n.key)"
                    (mouseenter)="hover(n.key)" (mouseleave)="hover(null)"
@@ -46,7 +46,7 @@
           <div class="ab-node ab-free" [attr.data-kind]="n.kind" data-drop [attr.data-node]="n.key" tabindex="0"
                [style.left.px]="n.x" [style.top.px]="n.y" [style.width.px]="n.w" [style.height.px]="n.h"
                [class.sel]="selected.has(n.key)" [class.hot]="hot.has(n.key)" [class.dim]="n.dim"
-               [class.drop]="dropKey === n.key" [class.pending]="n.pending" [class.moved]="movedKeys.has(n.key)" [class.hit]="n.hit && !n.dim"
+               [class.drop]="dropKey === n.key" [class.pending]="n.pending" [class.hit]="n.hit && !n.dim"
                (pointerdown)="onNodeDown($event, n)" (dblclick)="run('advise')" (contextmenu)="onContext($event, n.key)"
                (mouseenter)="hover(n.key)" (mouseleave)="hover(null)" (focus)="focusNode(n)"
                [attr.title]="n.problems.length ? n.problems.join('; ') : 'In no group yet. Drag it onto a group to add it there.'">
@@ -60,7 +60,7 @@
           <div class="ab-node ab-hub" [attr.data-family]="n.policy!.family" [attr.data-node]="n.key" tabindex="0"
                [style.left.px]="n.x" [style.top.px]="n.y" [style.width.px]="n.w" [style.height.px]="n.h"
                [class.sel]="selected.has(n.key)" [class.hot]="hot.has(n.key)" [class.dim]="n.dim"
-               [class.pending]="n.pending" [class.moved]="movedKeys.has(n.key)" [class.hit]="n.hit && !n.dim" [class.bad]="n.problemCount"
+               [class.pending]="n.pending" [class.hit]="n.hit && !n.dim" [class.bad]="n.problemCount"
                (pointerdown)="onNodeDown($event, n)" (contextmenu)="onContext($event, n.key)"
                (mouseenter)="hover(n.key)" (mouseleave)="hover(null)" (focus)="focusNode(n)"
                [attr.title]="famLabel(n) + ' policy ' + n.policy!.name + ' (' + n.policy!.semantic + ')'

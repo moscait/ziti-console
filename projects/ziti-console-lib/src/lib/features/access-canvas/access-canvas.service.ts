@@ -17,11 +17,12 @@
 import {Inject, Injectable} from '@angular/core';
 import {ZITI_DATA_SERVICE, ZitiDataService} from '../../services/ziti-data.service';
 import {ManagementPermissionsService} from '../../services/management-permissions.service';
+import {SETTINGS_SERVICE, SettingsService} from '../../services/settings.service';
 import {
-    AcErPolicy, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcRouter, AcSerp, AcService, AcServicePolicy,
-    KIND_API, LAYOUT_CONFIG_NAME, LAYOUT_CONFIG_TYPE, entitiesOf, erPolicyBody, identityBody, policyBody, serpBody, serviceBody,
+    AcErPolicy, AcIdentity, AcKind, AcModel, AcOp, AcRouter, AcSerp, AcService, AcServicePolicy,
+    KIND_API, entitiesOf, erPolicyBody, identityBody, policyBody, serpBody, serviceBody,
 } from './access-canvas.logic';
-import {emptyLayout, remapLayout} from './canvas-board.logic';
+import {BrowserLayoutStore, LayoutStore, layoutStorageKey} from './canvas-layout.store';
 
 /** One request that undoes one applied op. */
 export interface AcRevert { label: string; run: () => Promise<any>; }
@@ -35,18 +36,23 @@ export class AccessCanvasService {
     constructor(
         @Inject(ZITI_DATA_SERVICE) private data: ZitiDataService,
         private permissions: ManagementPermissionsService,
+        @Inject(SETTINGS_SERVICE) private settings: SettingsService,
     ) {}
+
+    /** The controller this console is signed in to; layouts are kept per controller. */
+    controllerName(): string {
+        return this.settings?.settings?.selectedEdgeController || '';
+    }
+
+    /** Where the canvas layout is kept: this browser, per controller. */
+    layoutStore(): LayoutStore {
+        return new BrowserLayoutStore(layoutStorageKey(this.controllerName()));
+    }
 
     /** True when the signed-in admin may change identities and both policy types. */
     canEdit(): boolean {
         const p = this.permissions;
         return p.canUpdate('identities') && p.canCreate('service-policies') && p.canUpdate('service-policies') && p.canCreate('edge-router-policies');
-    }
-
-    /** True when the canvas layout can be saved on the controller (a config of its own config type). */
-    canSaveLayout(): boolean {
-        const p = this.permissions;
-        return p.canCreate('configs') && p.canUpdate('configs') && p.canCreate('config-types');
     }
 
     private async all(type: string): Promise<any[]> {
@@ -158,8 +164,6 @@ export class AccessCanvasService {
                         attrs.set(`service:${id}`, [...op.service.attrs]);
                         reverts.unshift({label: `delete service ${op.service.name}`, run: () => this.data.delete('services', id)});
                     }
-                } else if (op.op === 'saveLayout') {
-                    reverts.unshift(await this.saveLayout(remapLayout(op.layout, idMap)));
                 } else if (op.op === 'addIdentityRole') {
                     const before = roles.get(op.policy) || [];
                     const after = before.includes(op.role) ? before : [...before, op.role];
@@ -189,47 +193,11 @@ export class AccessCanvasService {
         return reverts;
     }
 
-    // ------------------------------------------------------------------ layout
+    // ------------------------------------------------------------------ lookups
     private async byName(type: string, name: string): Promise<any | undefined> {
         const paging = {filter: '', noSearch: false, order: 'asc', page: 1, searchOn: 'name', sort: 'name', total: 10};
         const res = await this.data.get(type, paging, [{columnId: 'name', type: 'TEXTINPUT', verb: '=', value: name} as any]);
         return (res?.data || []).find((x: any) => x.name === name);
-    }
-
-    /** The shared canvas layout, or an empty one when it has never been saved (or can't be read). */
-    async loadLayout(): Promise<AcLayout> {
-        try {
-            const cfg = await this.byName('configs', LAYOUT_CONFIG_NAME);
-            const d = cfg?.data;
-            if (d && typeof d === 'object' && d.nodes && typeof d.nodes === 'object') {
-                return {v: 1, nodes: d.nodes, groups: Array.isArray(d.groups) ? d.groups : []};
-            }
-        } catch (err) {
-            console.warn('[access-canvas] could not read the saved layout', err);
-        }
-        return emptyLayout();
-    }
-
-    /** Writes the layout config (creating its config type and config the first time). */
-    private async saveLayout(layout: AcLayout): Promise<AcRevert> {
-        const data = {v: 1, nodes: layout.nodes, groups: layout.groups || []};
-        const existing = await this.byName('configs', LAYOUT_CONFIG_NAME);
-        if (existing) {
-            const before = existing.data;
-            await this.data.patch('configs', {data}, existing.id);
-            return {label: 'restore canvas layout', run: () => this.data.patch('configs', {data: before}, existing.id)};
-        }
-        let type = await this.byName('config-types', LAYOUT_CONFIG_TYPE);
-        if (!type) {
-            const res = await this.data.post('config-types', {
-                name: LAYOUT_CONFIG_TYPE,
-                schema: {type: 'object', description: 'Access Canvas layout: positions of canvas items. Not used by tunnelers.'},
-            });
-            type = {id: res?.data?.id};
-        }
-        const res = await this.data.post('configs', {name: LAYOUT_CONFIG_NAME, configTypeId: type.id, data});
-        const id = res?.data?.id;
-        return {label: 'delete canvas layout', run: () => id ? this.data.delete('configs', id) : Promise.resolve()};
     }
 
     async revert(reverts: AcRevert[]): Promise<void> {

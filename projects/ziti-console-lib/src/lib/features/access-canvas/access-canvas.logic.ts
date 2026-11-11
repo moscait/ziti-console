@@ -74,16 +74,13 @@ export type AcOp =
     | { op: 'createSerp'; policy: AcSerp }
     | { op: 'createConfig'; config: AcNewConfig }
     | { op: 'createIdentity'; identity: AcNewIdentity }
-    | { op: 'createService'; service: AcNewService }
-    | { op: 'saveLayout'; layout: AcLayout };
+    | { op: 'createService'; service: AcNewService };
 
 /** Management API collection for each kind. */
 export const KIND_API: Record<AcKind, string> = { identity: 'identities', service: 'services', router: 'edge-routers' };
 export const KIND_LABEL: Record<AcKind, [string, string]> = {
     identity: ['identity', 'identities'], service: ['service', 'services'], router: ['router', 'routers'],
 };
-export const LAYOUT_CONFIG_TYPE = 'access-canvas-layout.v1';
-export const LAYOUT_CONFIG_NAME = 'access-canvas-layout';
 
 export function entitiesOf(m: AcModel, kind: AcKind): { id: string; name: string; attrs: string[] }[] {
     return kind === 'identity' ? m.identities : kind === 'service' ? m.services : m.routers;
@@ -221,9 +218,6 @@ export function describeCalls(base: AcModel, ops: AcOp[]): string[] {
             out.push(`POST ${MGMT}/identities\n${JSON.stringify(identityBody(op.identity), null, 2)}`);
         } else if (op.op === 'createService') {
             out.push(`POST ${MGMT}/services\n${JSON.stringify(serviceBody(op.service), null, 2)}`);
-        } else if (op.op === 'saveLayout') {
-            out.push(`PATCH ${MGMT}/configs/<${LAYOUT_CONFIG_NAME}>   (created, with config type ${LAYOUT_CONFIG_TYPE}, if missing)\n` +
-                `{ "data": { …positions of ${Object.keys(op.layout.nodes).length} canvas items } }`);
         } else if (op.op === 'addIdentityRole') {
             const p = m.servicePolicies.find(x => x.id === op.policy)!;
             out.push(`PATCH ${MGMT}/service-policies/${p.id}\n{ "identityRoles": ${JSON.stringify(p.identityRoles)} }`);
