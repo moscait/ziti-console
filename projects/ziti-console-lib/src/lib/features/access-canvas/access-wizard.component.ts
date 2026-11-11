@@ -27,7 +27,7 @@ type Step = 0 | 1 | 2 | 3;
 const STEP_FIELDS: Record<Step, string[]> = {
     0: ['system', 'serviceName', 'interceptHost', 'interceptPort'],
     1: ['hostId', 'hostName', 'hostsAttr', 'hostAddress', 'hostPort'],
-    2: ['usersAttr', 'newUserName'],
+    2: ['usersAttr', 'newUserName', 'userIds'],
     3: [],
 };
 
@@ -106,6 +106,7 @@ export class AccessWizardComponent implements OnInit {
             this.w.hostId = this.people.find(i => i.name === sys)?.id || '';
         }
     }
+    setUserMode(mode: 'new' | 'existing'): void { this.w.userMode = mode; }
     toggleUser(id: string): void {
         const s = new Set(this.w.userIds);
         s.has(id) ? s.delete(id) : s.add(id);

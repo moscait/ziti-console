@@ -83,8 +83,9 @@ export interface WizardInput {
     hostId: string;
     hostName: string;
     hostsAttr: string;
-    /** Users: a role attribute, existing identities to add to it, and an optional new device. */
+    /** Users: a role attribute, and either a new user device or existing identities to add to it. */
     usersAttr: string;
+    userMode: 'new' | 'existing';
     userIds: string[];
     newUserName: string;
 }
@@ -116,7 +117,7 @@ export function suggest(templateId: string, system: string): Pick<WizardInput,
 export function blankInput(templateId = 'ssh', system = ''): WizardInput {
     return {
         templateId, system, ...suggest(templateId, system),
-        hostMode: 'new', hostId: '', userIds: [], newUserName: '',
+        hostMode: 'new', hostId: '', userMode: 'new', userIds: [], newUserName: '',
     };
 }
 
@@ -143,15 +144,25 @@ export function validate(m: AcModel, w: WizardInput): WizardCheck[] {
     }
     if (!validName(w.hostsAttr)) out.push({field: 'hostsAttr', message: 'Use lowercase letters, digits, dots and dashes.'});
     if (!validName(w.usersAttr)) out.push({field: 'usersAttr', message: 'Choose or type a user group.'});
-    if (w.newUserName) {
-        if (!validName(w.newUserName)) out.push({field: 'newUserName', message: 'Use lowercase letters, digits, dots and dashes.'});
-        else if (taken(m.identities, w.newUserName) || w.newUserName === w.hostName && w.hostMode === 'new') out.push({field: 'newUserName', message: `An identity named ${w.newUserName} already exists.`});
+    if (w.userMode === 'new') {
+        if (!w.newUserName) out.push({field: 'newUserName', message: 'Name the user\'s device, e.g. jdoe-laptop, or choose “Existing identities”.'});
+        else if (!validName(w.newUserName)) out.push({field: 'newUserName', message: 'Use lowercase letters, digits, dots and dashes.'});
+        else if (taken(m.identities, w.newUserName) || (w.hostMode === 'new' && w.newUserName === w.hostName)) {
+            out.push({field: 'newUserName', message: `An identity named ${w.newUserName} already exists. Choose “Existing identities” to use it.`});
+        }
+    } else {
+        const inGroup = m.identities.some(i => !i.isAdmin && i.attrs.includes(w.usersAttr) && !(w.hostMode === 'existing' && i.id === w.hostId));
+        if (!w.userIds.length && !inGroup) out.push({field: 'userIds', message: `Nobody has #${w.usersAttr} yet, so nobody could use it. Pick at least one identity, or create a new user device.`});
     }
     return out;
 }
 
 export interface WizardItem { what: string; name: string; detail: string; existing?: boolean; }
-export interface WizardPlan { ops: AcOp[]; items: WizardItem[]; title: string; summary: string; next: string[]; }
+export interface WizardPlan {
+    ops: AcOp[]; items: WizardItem[]; title: string; summary: string; next: string[];
+    /** Identities the plan creates, and existing ones it changes (shown at the top of the review). */
+    created: string[]; updated: string[];
+}
 
 /**
  * The changes for one service end to end: its two configs, the service, the hosting identity,
@@ -192,19 +203,19 @@ export function plan(m: AcModel, w: WizardInput, newId: () => string): WizardPla
     }
 
     const users: string[] = [];
-    for (const id of w.userIds) {
+    for (const id of w.userMode === 'existing' ? w.userIds : []) {
         const u = m.identities.find(i => i.id === id);
         if (!u) continue;
         users.push(u.name);
         if (!u.attrs.includes(w.usersAttr)) ops.push({op: 'addAttr', kind: 'identity', id, attr: w.usersAttr});
         items.push({what: 'Identity (user)', name: u.name, detail: `gets role attribute #${w.usersAttr}`, existing: true});
     }
-    if (w.newUserName) {
+    if (w.userMode === 'new' && w.newUserName) {
         ops.push({op: 'createIdentity', identity: {id: newId(), name: w.newUserName, attrs: [w.usersAttr]}});
         items.push({what: 'Identity (user)', name: w.newUserName, detail: `role attribute #${w.usersAttr}; enroll it on the user's device`});
         users.push(w.newUserName);
     }
-    const already = m.identities.filter(i => i.attrs.includes(w.usersAttr) && !w.userIds.includes(i.id)).map(i => i.name);
+    const already = m.identities.filter(i => !i.isAdmin && i.attrs.includes(w.usersAttr) && !users.includes(i.name)).map(i => i.name);
 
     ops.push({op: 'createPolicy', policy: {id: newId(), name: `${svc}-bind`, type: 'Bind', semantic: 'AnyOf',
         identityRoles: ['#' + w.hostsAttr], serviceRoles: ['#' + svc], posture: []}});
@@ -232,12 +243,14 @@ export function plan(m: AcModel, w: WizardInput, newId: () => string): WizardPla
         next.push(`On the server, enroll ${w.hostName} with its one-time token (Identities → ${w.hostName} → Token): ` +
             `sudo ziti-edge-tunnel enroll --jwt ${w.hostName}.jwt --identity /opt/openziti/etc/identities/${w.hostName}.json, then restart ziti-edge-tunnel.`);
     }
-    if (w.newUserName) next.push(`Enroll ${w.newUserName} in Ziti Desktop Edge (or another tunneler) on that user's device with its token.`);
+    if (w.userMode === 'new' && w.newUserName) next.push(`Enroll ${w.newUserName} in Ziti Desktop Edge (or another tunneler) on that user's device with its token.`);
     next.push(`Users connect to ${w.interceptHost}:${w.interceptPort} with their usual client; Ziti carries it to ${w.hostAddress}:${w.hostPort} on ${hostLabel}.`);
 
     const who = [...users, ...already];
+    const created = ops.filter(o => o.op === 'createIdentity').map((o: any) => o.identity.name);
+    const updated = [...new Set(ops.filter(o => o.op === 'addAttr').map((o: any) => m.identities.find(i => i.id === o.id)?.name).filter(Boolean))] as string[];
     return {
-        ops, items, next,
+        ops, items, next, created, updated,
         title: `Set up ${svc} for #${w.usersAttr}`,
         summary: `${t.label} on ${hostLabel}, reachable at ${w.interceptHost}:${w.interceptPort} by #${w.usersAttr}` +
             (who.length ? ` (${who.slice(0, 3).join(', ')}${who.length > 3 ? ` and ${who.length - 3} more` : ''})` : ' (nobody has it yet)') + '.',

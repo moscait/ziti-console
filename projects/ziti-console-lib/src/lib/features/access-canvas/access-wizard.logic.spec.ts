@@ -42,25 +42,52 @@ describe('access-wizard.logic', () => {
         expect(fields).toContain('serviceName');   // loft-50-ssh exists
         expect(fields).toContain('interceptPort');
         w.serviceName = 'loft-50-ssh2'; w.interceptPort = 22;
+        expect(validate(model(), w).map(c => c.field)).toEqual(['newUserName']);   // a user device is required by default
+        w.newUserName = 'jdoe-laptop';
         expect(validate(model(), w)).toEqual([]);
+    });
+
+    it('refuses a service nobody could use', () => {
+        const w = blankInput('postgres', 'billing-db');
+        w.userMode = 'existing';
+        w.usersAttr = 'dbas';   // nobody has it
+        expect(validate(model(), w).map(c => c.field)).toEqual(['userIds']);
+        w.userIds = ['i2'];
+        expect(validate(model(), w)).toEqual([]);
+        w.userIds = []; w.usersAttr = 'ssh-users';   // cjm-macbook-air already has it
+        expect(validate(model(), w)).toEqual([]);
+    });
+
+    it('creates two identities by default: the host and the user device', () => {
+        const w = blankInput('postgres', 'billing-db');
+        w.newUserName = 'jdoe-laptop';
+        const p = plan(model(), w, ids());
+        expect(p.created).toEqual(['billing-db', 'jdoe-laptop']);
+        expect(p.updated).toEqual([]);
     });
 
     it('builds configs, service, hosting identity, users and policies that give access end to end', () => {
         const m = model();
         const w = blankInput('https', 'crm');
         w.usersAttr = 'employees';
-        w.userIds = ['i2'];
         w.newUserName = 'jdoe-laptop';
         const p = plan(m, w, ids());
         const kinds = p.ops.map(o => o.op);
-        expect(kinds).toEqual(['createConfig', 'createConfig', 'createService', 'createIdentity', 'addAttr', 'createIdentity', 'createPolicy', 'createPolicy']);
+        expect(kinds).toEqual(['createConfig', 'createConfig', 'createService', 'createIdentity', 'createIdentity', 'createPolicy', 'createPolicy']);
+        // The same group, with an existing identity instead of a new device.
+        const w2 = {...w, serviceName: 'crm-https-2', userMode: 'existing' as const, userIds: ['i2']};
+        const p2 = plan(m, w2, ids());
+        expect(p2.updated).toEqual(['cjm-macbook-pro']);
+        const after2 = applyOps(clone(m), p2.ops);
+        const svc2 = after2.services.find(s => s.name === 'crm-https-2')!;
+        expect(dialFor(after2, after2.identities.find(i => i.name === 'cjm-macbook-pro')!, svc2).length).toBe(1);
         const after = applyOps(clone(m), p.ops);
         const svc = after.services.find(s => s.name === 'crm-https')!;
         expect(svc.attrs).toEqual(['crm-https', 'https']);
         const host = after.identities.find(i => i.name === 'crm')!;
         expect(hostsFor(after, svc).map(h => h.name)).toEqual(['crm']);
         expect(host.attrs).toEqual(['crm-https-hosts']);
-        for (const name of ['cjm-macbook-pro', 'jdoe-laptop']) {
+        for (const name of ['jdoe-laptop']) {
             const u = after.identities.find(i => i.name === name)!;
             expect(dialFor(after, u, svc).map(x => x.name)).toEqual(['crm-https-dial']);
         }

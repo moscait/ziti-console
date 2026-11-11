@@ -109,33 +109,45 @@
           <span class="ac-hint">Pick a group above or type your own, e.g. ssh-users.</span>
           @if (errorFor('usersAttr')) { <span class="ac-err">{{ errorFor('usersAttr') }}</span> }
         </label>
-        <label class="ac-field">New user device (optional)
-          <input [(ngModel)]="w.newUserName" (blur)="clean('newUserName')" placeholder="e.g. jdoe-laptop" autocomplete="off">
-          <span class="ac-hint">Creates an identity in #{{ w.usersAttr }} to enroll on that person's device. Leave empty to only use existing identities.</span>
-          @if (errorFor('newUserName')) { <span class="ac-err">{{ errorFor('newUserName') }}</span> }
-        </label>
       </div>
-      @if (usersInGroup().length) {
-        <p class="ac-small">Already in #{{ w.usersAttr }}: {{ usersInGroupNames }}.</p>
-      }
-      @if (people.length) {
-        <div class="ac-field">Add existing identities to #{{ w.usersAttr }}
-          <div class="ac-wiz-people">
-            @for (i of people; track i.id) {
-              @if (!i.attrs.includes(w.usersAttr) && !(w.hostMode === 'existing' && w.hostId === i.id)) {
-                <button type="button" class="ac-attropt" [class.on]="w.userIds.includes(i.id)" [attr.aria-pressed]="w.userIds.includes(i.id)" (click)="toggleUser(i.id)">
-                  <span class="ac-check" aria-hidden="true">{{ w.userIds.includes(i.id) ? '✓' : '' }}</span>
-                  <span>{{ i.name }}</span><span class="ac-small">{{ i.attrs.length ? '#' + i.attrs.join(' #') : '' }}</span></button>
-              }
-            }
-          </div>
+      <div class="ac-field">Who will use it
+        <div class="ac-seg" role="radiogroup" aria-label="Users">
+          <button type="button" role="radio" class="ac-chipbtn" [class.on]="w.userMode === 'new'" [attr.aria-checked]="w.userMode === 'new'" (click)="setUserMode('new')">New user device</button>
+          <button type="button" role="radio" class="ac-chipbtn" [class.on]="w.userMode === 'existing'" [attr.aria-checked]="w.userMode === 'existing'" (click)="setUserMode('existing')">Existing identities</button>
         </div>
+      </div>
+      @if (w.userMode === 'new') {
+        <div class="ac-wiz-grid">
+          <label class="ac-field">Device identity name
+            <input [(ngModel)]="w.newUserName" (blur)="clean('newUserName')" placeholder="e.g. jdoe-laptop" autocomplete="off">
+            <span class="ac-hint">One identity per device, usually &lt;person&gt;-&lt;device&gt;. It gets #{{ w.usersAttr }}, and you enroll it on that device with Ziti Desktop Edge.</span>
+            @if (errorFor('newUserName')) { <span class="ac-err">{{ errorFor('newUserName') }}</span> }
+          </label>
+        </div>
+      } @else {
+        @if (usersInGroup().length) {
+          <p class="ac-small">Already in #{{ w.usersAttr }}: {{ usersInGroupNames }}. Pick more to add them.</p>
+        }
+        <div class="ac-wiz-people" role="group" aria-label="Identities to add">
+          @for (i of people; track i.id) {
+            @if (!i.attrs.includes(w.usersAttr) && !(w.hostMode === 'existing' && w.hostId === i.id)) {
+              <button type="button" class="ac-attropt" [class.on]="w.userIds.includes(i.id)" [attr.aria-pressed]="w.userIds.includes(i.id)" (click)="toggleUser(i.id)">
+                <span class="ac-check" aria-hidden="true">{{ w.userIds.includes(i.id) ? '✓' : '' }}</span>
+                <span>{{ i.name }}</span><span class="ac-small">{{ i.attrs.length ? '#' + i.attrs.join(' #') : '' }}</span></button>
+            }
+          }
+        </div>
+        @if (errorFor('userIds')) { <span class="ac-err">{{ errorFor('userIds') }}</span> }
       }
     }
 
     <!-- 4. Review -->
     @if (step === 3 && result) {
       <p class="ac-lede"><b>{{ result.summary }}</b> These are added to Pending changes; nothing is sent until you apply.</p>
+      <div class="ac-wiz-count">
+        <span><b>{{ result.created.length }}</b> new {{ result.created.length === 1 ? 'identity' : 'identities' }}@if (result.created.length) {: {{ result.created.join(', ') }}}</span>
+        @if (result.updated.length) { <span><b>{{ result.updated.length }}</b> existing updated: {{ result.updated.join(', ') }}</span> }
+      </div>
       <div class="ac-ptable-wrap">
         <table class="ac-ptable">
           <thead><tr><th scope="col"><span>Creates</span></th><th scope="col"><span>Name</span></th><th scope="col"><span>Details</span></th></tr></thead>
