@@ -14,9 +14,7 @@
     limitations under the License.
 */
 
-import {
-    AfterViewChecked, ChangeDetectorRef, Component, ElementRef, NgZone, OnDestroy, OnInit, ViewChild, ViewEncapsulation,
-} from '@angular/core';
+import {ChangeDetectorRef, Component, OnDestroy, OnInit, ViewChild, ViewEncapsulation} from '@angular/core';
 import {CommonModule} from '@angular/common';
 import {FormsModule} from '@angular/forms';
 import {Router} from '@angular/router';
@@ -24,58 +22,103 @@ import {GrowlerService} from '../messaging/growler.service';
 import {GrowlerModel} from '../messaging/growler.model';
 import {AccessCanvasService, AcRevert} from './access-canvas.service';
 import {
-    AcEndpoint, AcGrantResult, AcGuideStep, AcIdentity, AcModel, AcOp, AcService, AcServicePolicy, AcStep,
-    CONCEPTS, accessSet, advise, applyOps, buildOptions, clients, clone, describeCalls, dialFor, groups, guideSteps,
-    hosts, hostsFor, identityRouters, roleLabel,
+    AcEndpoint, AcGrantResult, AcGuideStep, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcStep,
+    CONCEPTS, KIND_LABEL, accessSet, advise, applyOps, buildOptions, clients, clone, describeCalls, entitiesOf, groups, guideSteps,
 } from './access-canvas.logic';
+import {
+    Board, BoardFilters, Clip, ClipItem, IntentResult, buildBoard, emptyLayout, freeKey, groupKey, marksFor, moveMember,
+    pasteAsNew, pasteIntoGroup, pasteOntoEntities, removeFromGroups, sameLayout,
+} from './canvas-board.logic';
+import {BoardCommand, CanvasBoardComponent, MemberDrop, NodeDrop, SelItem} from './canvas-board.component';
 
 interface Pending { id: string; title: string; summary: string; ops: AcOp[]; calls: string[]; }
 interface Applied { title: string; reverts: AcRevert[]; }
-interface Edge { a: string; b: string; cls: string; p: string; }
-interface GroupVm<T> { key: string; attr: string; members: T[]; shown: T[]; more: number; open: boolean; services?: number; unrouted?: number; unenrolled?: number; }
+type ProbKind = 'identity' | 'service' | 'router' | 'policy';
+/** One row in the problems table: one problem on one item. */
+interface ProblemRow {
+    id: string; kind: ProbKind; typeLabel: string; name: string;
+    problem: string; detail: string; hint: string; node: string; route: any[];
+}
+type ProbSort = 'type' | 'name' | 'problem';
 
-const CAP = 8;
+/** What to do about each kind of problem, in the console's own words. */
+const PROBLEM_HINTS: Record<string, string> = {
+    'Not enrolled': 'Enroll it with its one-time token (JWT), shown in the Token column on the Identities page. The token expires; create a new one if it has.',
+    'No edge router policy': 'Add a Router Policy whose Identity Attributes include this identity (for example #all on #all).',
+    'Hosting identity is offline': 'Start the tunneler on the machine that hosts its services, or check its network.',
+    'Not hosted': 'Add a Bind service policy whose Service Attributes select this service and whose Identity Attributes select the identity running next to the server.',
+    'Host not enrolled': 'Enroll the identity that hosts it (see its Token on the Identities page).',
+    'No service edge router policy': 'Add a Service Router Policy whose Service Attributes include this service (for example #all on #all).',
+    'Nobody can use it': 'Add a Dial service policy that selects this service, or give the service a role attribute an existing Dial policy already selects.',
+    'Offline': 'Check that the router process is running and can reach the controller.',
+    'Selects no identities': 'Give the intended identities this role attribute (Roles on the Identities page), or change the policy\'s Identity Attributes.',
+    'Selects no services': 'Give the intended services this role attribute (Roles on the Services page), or change the policy\'s Service Attributes.',
+    'Selects no routers': 'Give the intended routers this role attribute, or change the policy\'s Router Attributes.',
+    'Names a missing identity': 'The @name it refers to no longer exists. Edit the policy.',
+    'Names a missing service': 'The @name it refers to no longer exists. Edit the policy.',
+    'Names a missing router': 'The @name it refers to no longer exists. Edit the policy.',
+};
+const POLICY_LABEL: Record<string, string> = {dial: 'Dial policy', bind: 'Bind policy', erp: 'Router Policy', serp: 'Service Router Policy'};
+const POLICY_ROUTE: Record<string, string> = {dial: '/service-policies', bind: '/service-policies', erp: '/router-policies', serp: '/service-router-policies'};
+const ENTITY_ROUTE: Record<AcKind, string> = {identity: '/identities', service: '/services', router: '/routers'};
+
+const LAYOUT_SET = 'layout';
+const KINDS: AcKind[] = ['identity', 'service', 'router'];
 
 @Component({
     selector: 'lib-access-canvas',
     standalone: true,
-    imports: [CommonModule, FormsModule],
+    imports: [CommonModule, FormsModule, CanvasBoardComponent],
     templateUrl: './access-canvas.component.html',
     styleUrls: ['./access-canvas.component.scss'],
     encapsulation: ViewEncapsulation.None,
 })
-export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestroy {
-    @ViewChild('flow') flowRef?: ElementRef<HTMLElement>;
-    @ViewChild('edges') edgesRef?: ElementRef<SVGSVGElement>;
+export class AccessCanvasComponent implements OnInit, OnDestroy {
+    @ViewChild(CanvasBoardComponent) boardCmp?: CanvasBoardComponent;
 
     readonly concepts = CONCEPTS;
+    readonly kinds = KINDS;
+    readonly kindLabel = KIND_LABEL;
     loading = true;
     busy = false;
     loadError = '';
     readOnly = false;
+    canSaveLayout = true;
 
     committed: AcModel | null = null;
     draft: AcModel | null = null;
     pending: Pending[] = [];
     history: Applied[] = [];
 
-    filter = '';
-    expanded = new Set<string>();
-    shownConcepts = new Set<string>();
-    guideOpen = true;
-    advisorPassed = false;
+    layoutCommitted: AcLayout = emptyLayout();
+    layoutDraft: AcLayout = emptyLayout();
+    movedKeys = new Set<string>();
 
-    // view models
-    idGroups: GroupVm<AcIdentity>[] = [];
-    svcGroups: GroupVm<AcService>[] = [];
-    hostGroups: GroupVm<AcIdentity>[] = [];
-    dials: AcServicePolicy[] = [];
-    binds: AcServicePolicy[] = [];
+    filters: BoardFilters = {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false};
+    filterMenu = false;
+    attrQuery = '';
+    expanded = new Set<string>();
+    board: Board = {nodes: [], edges: []};
+    problemTotal = 0;
+    /** Every problem, one row each, regardless of canvas filters. */
+    problemRowsAll: ProblemRow[] = [];
+    problemsOpen = false;
+    pf: { q: string; kind: ProbKind | 'all'; type: string } = {q: '', kind: 'all', type: ''};
+    pSort: { col: ProbSort; dir: 1 | -1 } = {col: 'type', dir: 1};
+    clip: Clip | null = null;
+
+    shownConcepts = new Set<string>();
+    guideOpen = false;
+    helpOpen = false;
+    /** The panel floating over the right of the board, if open. */
+    drawer: 'pending' | 'advisor' | null = null;
+    /** Briefly true after a change is queued, so the pending button draws the eye. */
+    pulse = false;
+    private pulseTimer?: ReturnType<typeof setTimeout>;
+    advisorPassed = false;
     guide: AcGuideStep[] = [];
     guideDone = 0;
-    marks = new Set<string>();
-    advisorClients: GroupVm<AcIdentity>[] = [];
-
+    advisorClients: { attr: string; members: AcIdentity[] }[] = [];
     advisorI = '';
     advisorS = '';
     advice: AcStep[] = [];
@@ -83,42 +126,24 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
     advicePosture = false;
 
     dialog: { src: AcEndpoint; tgt: AcEndpoint | null; result?: AcGrantResult; selected: number; } | null = null;
-    dragging = false;
-    overKey = '';
+    dialogTarget = '';
+    newGroup: { kind: AcKind; attr: string; at: { x: number; y: number } } | null = null;
 
-    private edges: Edge[] = [];
-    private edgesDirty = true;
-    private resizeObs?: ResizeObserver;
     private seq = 1;
 
     constructor(
         private svc: AccessCanvasService,
         private growler: GrowlerService,
         private router: Router,
-        private zone: NgZone,
         private cdr: ChangeDetectorRef,
     ) {}
 
+    ngOnDestroy(): void { clearTimeout(this.pulseTimer); }
+
     ngOnInit(): void {
         this.readOnly = !this.svc.canEdit();
+        this.canSaveLayout = this.svc.canSaveLayout();
         this.reload();
-    }
-
-    ngAfterViewChecked(): void {
-        if (this.flowRef && !this.resizeObs) {
-            this.zone.runOutsideAngular(() => {
-                this.resizeObs = new ResizeObserver(() => requestAnimationFrame(() => this.drawEdges()));
-                this.resizeObs.observe(this.flowRef!.nativeElement);
-            });
-        }
-        if (this.edgesDirty) {
-            this.edgesDirty = false;
-            this.zone.runOutsideAngular(() => requestAnimationFrame(() => this.drawEdges()));
-        }
-    }
-
-    ngOnDestroy(): void {
-        this.resizeObs?.disconnect();
     }
 
     // ------------------------------------------------------------------ data
@@ -127,7 +152,11 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
         this.loadError = '';
         let stage = 'loading the network';
         try {
-            this.committed = await this.svc.load();
+            const [model, layout] = await Promise.all([this.svc.load(), this.svc.loadLayout()]);
+            this.committed = model;
+            this.layoutCommitted = layout;
+            // Keep unsaved moves across a refresh; otherwise follow what's saved.
+            if (!this.pending.some(p => p.id === LAYOUT_SET)) this.layoutDraft = clone(layout);
             stage = 'drawing the canvas';
             this.refresh();
         } catch (err) {
@@ -139,189 +168,399 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
         }
     }
 
+    /** Refresh button: reload from the controller, then fit the board to the screen. */
+    async refreshAndFit(): Promise<void> {
+        await this.reload();
+        requestAnimationFrame(() => this.boardCmp?.fit());
+    }
+
+    toggleDrawer(d: 'pending' | 'advisor'): void { this.drawer = this.drawer === d ? null : d; }
+
     private newId = () => `new-${this.seq++}`;
 
     refresh(): void {
         if (!this.committed) return;
         const m = this.draft = this.pending.reduce((acc, c) => applyOps(acc, c.ops), clone(this.committed));
-        this.marks = this.pendingMarks();
-        const f = this.filter.trim().toLowerCase().replace(/^[#@]/, '');
-        const hit = (e: { name: string; attrs: string[] }) => !f || e.name.toLowerCase().includes(f) || e.attrs.some(a => a.toLowerCase().includes(f));
-        const filtered = <T extends { name: string; attrs: string[] }>(list: T[]) =>
-            groups(list as any as (T & { id: string })[])
-                .map(([a, ms]) => [a, f && !a.toLowerCase().includes(f) ? ms.filter(hit) : ms] as [string, T[]])
-                .filter(([, ms]) => ms.length);
-
-        this.idGroups = filtered(clients(m)).map(([a, ms]) => {
-            const key = 'idg:' + a;
-            const open = this.expanded.has(key) || !!f;
-            return {
-                key, attr: a, members: ms, open, shown: f ? ms : ms.slice(0, CAP), more: f ? 0 : Math.max(0, ms.length - CAP),
-                services: new Set(ms.flatMap(i => m.services.filter(s => dialFor(m, i, s).length).map(s => s.id))).size,
-                unrouted: ms.filter(i => !identityRouters(m, i).length).length,
-                unenrolled: ms.filter(i => !i.enrolled).length,
-            };
-        });
-        this.svcGroups = filtered(m.services).map(([a, ms]) => ({key: 'svcg:' + a, attr: a, members: ms, shown: ms, more: 0, open: true}));
-        this.hostGroups = filtered(hosts(m)).map(([a, ms]) => ({key: 'hg:' + a, attr: a, members: ms, shown: ms, more: 0, open: true}));
-        this.dials = m.servicePolicies.filter(p => p.type === 'Dial');
-        this.binds = m.servicePolicies.filter(p => p.type === 'Bind');
-        this.advisorClients = groups(clients(m)).map(([a, ms]) => ({key: a, attr: a, members: ms, shown: ms, more: 0, open: true}));
-        this.buildEdges(m);
+        this.board = buildBoard(m, {layout: this.layoutDraft, filters: this.filters, marks: marksFor(this.pending.map(p => p.ops)), expanded: this.expanded});
+        this.collectProblems(m);
+        this.movedKeys = new Set(Object.keys(this.layoutDraft.nodes).filter(k => {
+            const a = this.layoutDraft.nodes[k], b = this.layoutCommitted.nodes[k];
+            return !b || a.x !== b.x || a.y !== b.y;
+        }));
+        this.advisorClients = groups(clients(m)).map(([attr, members]) => ({attr, members}));
         this.runAdvisor();
         this.guide = guideSteps(m, {pending: this.pending.length, advisorPassed: this.advisorPassed});
         this.guideDone = this.guide.filter(s => s.done).length;
-        this.edgesDirty = true;
     }
 
-    private pendingMarks(): Set<string> {
-        const s = new Set<string>();
-        for (const c of this.pending) for (const op of c.ops) {
-            if (op.op === 'addAttr') s.add(`attr:${op.identity}:${op.attr}`);
-            if (op.op === 'addIdentityRole') s.add(`role:${op.policy}:${op.role}`);
-            if (op.op === 'createPolicy' || op.op === 'createErPolicy') s.add(`policy:${op.policy.id}`);
+    // ------------------------------------------------------------------ filters
+    get allAttrs(): { attr: string; count: number; kinds: string }[] {
+        if (!this.draft) return [];
+        const map = new Map<string, { count: number; kinds: Set<AcKind> }>();
+        for (const k of KINDS) for (const e of entitiesOf(this.draft, k)) for (const a of e.attrs) {
+            if (!map.has(a)) map.set(a, {count: 0, kinds: new Set()});
+            const v = map.get(a)!; v.count++; v.kinds.add(k);
         }
-        return s;
+        const q = this.attrQuery.trim().toLowerCase().replace(/^#/, '');
+        return [...map.entries()].filter(([a]) => !q || a.toLowerCase().includes(q)).sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([attr, v]) => ({attr, count: v.count, kinds: [...v.kinds].map(k => KIND_LABEL[k][1]).join(', ')}));
     }
-
-    // ------------------------------------------------------------------ helpers for the template
-    role(r: string): string { return this.draft ? roleLabel(this.draft, r) : r; }
-    hostCount(s: AcService): number { return this.draft ? hostsFor(this.draft, s).length : 0; }
-    trackKey = (_: number, g: GroupVm<any>) => g.key;
-    trackId = (_: number, e: { id: string }) => e.id;
-    otherAttrs(i: AcIdentity, a: string): string[] { return i.attrs.filter(x => x !== a); }
-    plural(n: number, one: string, many: string): string { return `${n} ${n === 1 ? one : many}`; }
-    srcOf(kind: 'group' | 'identity', v: string): AcEndpoint { return kind === 'group' ? {kind, attr: v} : {kind, id: v}; }
-
-    get erPolicies() { return this.draft?.erPolicies || []; }
-    get serps() { return this.draft?.serps || []; }
-    get routerGroups() { return this.draft ? groups(this.draft.routers) : []; }
-    get pendingCalls(): number { return this.pending.reduce((n, c) => n + c.ops.length, 0); }
-    get nextGuide(): AcGuideStep | undefined { return this.guide.find(s => !s.done); }
-
-    toggleGroup(key: string): void {
-        this.expanded.has(key) ? this.expanded.delete(key) : this.expanded.add(key);
+    toggleType(k: AcKind): void { this.filters.types[k] = !this.filters.types[k]; this.refresh(); }
+    toggleAttr(a: string): void {
+        const s = new Set(this.filters.attrs);
+        s.has(a) ? s.delete(a) : s.add(a);
+        this.filters.attrs = [...s];
         this.refresh();
     }
-    toggleConcept(c: string): void {
-        this.shownConcepts.has(c) ? this.shownConcepts.delete(c) : this.shownConcepts.add(c);
-        this.edgesDirty = true;
+    clearFilters(): void {
+        this.filters = {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false};
+        this.refresh();
     }
-    onFilter(): void { this.refresh(); }
-    toggleGuide(): void { this.guideOpen = !this.guideOpen; this.edgesDirty = true; }
-    go(route: string): void { this.router.navigate([route]); }
-
-    // ------------------------------------------------------------------ edges
-    private buildEdges(m: AcModel): void {
-        const edges: Edge[] = [];
-        const cg = this.idGroups.map(g => g.attr), hg = this.hostGroups.map(g => g.attr), sg = this.svcGroups.map(g => g.attr);
-        const firstGroup = (attrs: string[], pre: string, avail: string[]) => {
-            const a = attrs.find(x => avail.includes(x)) ?? (avail.includes('') && !attrs.length ? '' : undefined);
-            return a === undefined ? [] : [pre + a];
-        };
-        for (const p of m.servicePolicies) {
-            const isDial = p.type === 'Dial', pk = (isDial ? 'dp:' : 'bp:') + p.id;
-            const pend = this.marks.has(`policy:${p.id}`);
-            for (const r of p.identityRoles) {
-                const avail = isDial ? cg : hg, pre = isDial ? 'idg:' : 'hg:';
-                let keys: string[] = [];
-                if (r === '#all') keys = avail.map(a => pre + a);
-                else if (r[0] === '#') keys = avail.includes(r.slice(1)) ? [pre + r.slice(1)] : [];
-                else { const e = m.identities.find(x => '@' + x.id === r || '@' + x.name === r); if (e) keys = firstGroup(e.attrs, pre, avail); }
-                const cls = [isDial ? 'dial' : 'bind', r[0] === '@' ? 'byname' : '', pend || this.marks.has(`role:${p.id}:${r}`) ? 'pending' : ''].join(' ');
-                keys.forEach(k => edges.push({a: k, b: pk, cls, p: p.id}));
+    /** How many filters narrow the view (hidden kinds plus picked attributes). */
+    get narrowCount(): number { return KINDS.filter(k => !this.filters.types[k]).length + this.filters.attrs.length; }
+    get searchMatches(): number {
+        return this.board.nodes.reduce((n, x) => n + (x.type === 'group' ? x.members.filter(mb => mb.hit).length + (x.hit && !x.members.some(mb => mb.hit) ? 1 : 0) : x.hit ? 1 : 0), 0);
+    }
+    /** One row per problem on each identity, service, router or policy (an entity in two groups counts once). */
+    private collectProblems(m: AcModel): void {
+        const all = buildBoard(m, {
+            layout: this.layoutDraft, marks: marksFor([]), expanded: new Set(),
+            filters: {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false},
+        });
+        const rows: ProblemRow[] = [];
+        const seen = new Set<string>();
+        const push = (base: Omit<ProblemRow, 'id' | 'problem' | 'detail' | 'hint'>, problems: string[]) => {
+            for (const text of problems) {
+                const i = text.indexOf(': ');
+                const problem = i > 0 ? text.slice(0, i) : text, detail = i > 0 ? text.slice(i + 2) : '';
+                rows.push({...base, id: `${base.node}|${text}`, problem, detail, hint: PROBLEM_HINTS[problem] || ''});
             }
-            for (const r of p.serviceRoles) {
-                let keys: string[] = [];
-                if (r === '#all') keys = sg.map(a => 'svcg:' + a);
-                else if (r[0] === '#') keys = sg.includes(r.slice(1)) ? ['svcg:' + r.slice(1)] : [];
-                else { const s = m.services.find(x => '@' + x.id === r || '@' + x.name === r); if (s) keys = firstGroup(s.attrs, 'svcg:', sg); }
-                const cls = [isDial ? 'dial' : 'bind', r[0] === '@' ? 'byname' : '', pend ? 'pending' : ''].join(' ');
-                keys.forEach(k => edges.push({a: pk, b: k, cls, p: p.id}));
+        };
+        const entity = (kind: AcKind, id: string, name: string, node: string, problems: string[]) => {
+            if (!problems.length || seen.has(kind + ':' + id)) return;
+            seen.add(kind + ':' + id);
+            push({kind, typeLabel: KIND_LABEL[kind][0][0].toUpperCase() + KIND_LABEL[kind][0].slice(1), name, node, route: [ENTITY_ROUTE[kind], id]}, problems);
+        };
+        for (const n of all.nodes) {
+            if (n.type === 'group') n.members.forEach(mb => entity(mb.kind, mb.id, mb.name, `m|${n.key}|${mb.id}`, mb.problems));
+            else if (n.type === 'free') entity(n.kind!, n.entity!.id, n.entity!.name, n.key, n.problems);
+            else if (n.problems.length) {
+                const pol = n.policy!;
+                push({kind: 'policy', typeLabel: POLICY_LABEL[pol.family], name: pol.name, node: n.key, route: [POLICY_ROUTE[pol.family], pol.id]}, n.problems);
             }
         }
-        this.edges = edges;
+        this.problemRowsAll = rows;
+        this.problemTotal = new Set(rows.map(r => r.node.startsWith('m|') ? r.route.join('/') : r.node)).size;
     }
 
-    private drawEdges(): void {
-        const flow = this.flowRef?.nativeElement, svg = this.edgesRef?.nativeElement;
-        if (!flow || !svg || getComputedStyle(svg).display === 'none') return;
-        const base = flow.getBoundingClientRect();
-        const W = flow.scrollWidth, H = flow.scrollHeight;
-        svg.setAttribute('width', String(W));
-        svg.setAttribute('height', String(H));
-        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-        const node = (k: string) => flow.querySelector(`[data-node="${CSS.escape(k)}"]`) as HTMLElement | null;
-        const esc = (s: string) => s.replace(/"/g, '&quot;');
-        svg.innerHTML = this.edges.map(e => {
-            const a = node(e.a), b = node(e.b);
-            if (!a || !b) return '';
-            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-            const y1 = ra.top - base.top + Math.min(20, ra.height / 2), y2 = rb.top - base.top + Math.min(20, rb.height / 2);
-            let x1: number, x2: number;
-            if (ra.right <= rb.left) { x1 = ra.right - base.left; x2 = rb.left - base.left; } else { x1 = ra.left - base.left; x2 = rb.right - base.left; }
-            const dx = (x2 - x1) / 2;
-            return `<path class="${e.cls}" data-p="${esc(e.p)}" data-a="${esc(e.a)}" data-b="${esc(e.b)}" d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}"/>`;
-        }).join('');
+    get probKinds(): { v: ProbKind | 'all'; label: string; n: number }[] {
+        const n = (k: ProbKind) => this.problemRowsAll.filter(r => r.kind === k).length;
+        return [
+            {v: 'all', label: 'All', n: this.problemRowsAll.length},
+            {v: 'identity', label: 'Identities', n: n('identity')},
+            {v: 'service', label: 'Services', n: n('service')},
+            {v: 'router', label: 'Routers', n: n('router')},
+            {v: 'policy', label: 'Policies', n: n('policy')},
+        ].filter(k => k.v === 'all' || k.n) as any;
+    }
+    get probTypes(): string[] { return [...new Set(this.problemRowsAll.map(r => r.problem))].sort(); }
+
+    /** Rows after the dialog's filters and sort. */
+    get problemRows(): ProblemRow[] {
+        const q = this.pf.q.trim().toLowerCase();
+        const rows = this.problemRowsAll.filter(r =>
+            (this.pf.kind === 'all' || r.kind === this.pf.kind) && (!this.pf.type || r.problem === this.pf.type)
+            && (!q || `${r.name} ${r.typeLabel} ${r.problem} ${r.detail}`.toLowerCase().includes(q)));
+        const key = (r: ProblemRow) => this.pSort.col === 'type' ? r.typeLabel + ' ' + r.name : this.pSort.col === 'name' ? r.name : r.problem + ' ' + r.name;
+        return rows.sort((a, b) => key(a).localeCompare(key(b)) * this.pSort.dir);
+    }
+    sortProblems(col: ProbSort): void { this.pSort = {col, dir: this.pSort.col === col ? (-this.pSort.dir as 1 | -1) : 1}; }
+    sortMark(col: ProbSort): string { return this.pSort.col === col ? (this.pSort.dir === 1 ? '▲' : '▼') : ''; }
+    openProblems(): void { this.pf = {q: '', kind: 'all', type: ''}; this.problemsOpen = true; }
+
+    /** Close the dialog and point at the item on the canvas (clearing filters that hide it). */
+    showProblem(r: ProblemRow): void {
+        this.problemsOpen = false;
+        const nodeKey = r.node.startsWith('m|') ? r.node.split('|')[1] : r.node;
+        if (!this.board.nodes.some(n => n.key === nodeKey)) this.clearFilters();
+        requestAnimationFrame(() => {
+            this.boardCmp?.reveal(nodeKey);
+            if (r.node.startsWith('m|') && this.boardCmp) { this.boardCmp.selected = new Set([r.node]); this.boardCmp.closeMenu(); }
+        });
+    }
+    openProblem(r: ProblemRow): void {
+        if (String(r.route[1]).startsWith('new-')) { this.toast('info', 'Not created yet', 'Apply pending changes first.'); return; }
+        this.router.navigate(r.route);
+    }
+    toggleProblemsOnly(): void {
+        this.filters.problemsOnly = !this.filters.problemsOnly;
+        this.problemsOpen = false;
+        this.refresh();
+        requestAnimationFrame(() => this.boardCmp?.fit());
     }
 
-    focusCard(ev: Event): void {
-        const card = (ev.target as HTMLElement).closest('.ac-card[data-node]') as HTMLElement | null;
-        const flow = this.flowRef?.nativeElement, svg = this.edgesRef?.nativeElement;
-        if (!card || !flow || !svg) return;
-        this.unfocus();
-        const pid = card.dataset['policy'], key = card.dataset['node'];
-        const paths = Array.from(svg.querySelectorAll('path')) as SVGPathElement[];
-        const hot = paths.filter(p => pid ? p.dataset['p'] === pid : (p.dataset['a'] === key || p.dataset['b'] === key));
-        if (!hot.length) return;
-        const pids = new Set(hot.map(p => p.dataset['p']));
-        const allHot = paths.filter(p => pids.has(p.dataset['p']));
-        allHot.forEach(p => p.classList.add('hot'));
-        const keys = new Set(allHot.flatMap(p => [p.dataset['a'], p.dataset['b']]));
-        flow.querySelectorAll('.ac-card[data-node]').forEach(c => c.classList.toggle('hot', keys.has((c as HTMLElement).dataset['node'])));
-        svg.classList.add('focusing');
-        flow.classList.add('focusing');
+    get filtersActive(): boolean {
+        const f = this.filters;
+        return !f.types.identity || !f.types.service || !f.types.router || !!f.attrs.length || !!f.search.trim() || f.problemsOnly;
+    }
+    onSearch(): void { this.refresh(); }
+    revealFirstHit(): void {
+        const n = this.board.nodes.find(x => x.hit);
+        if (n) this.boardCmp?.reveal(n.key);
     }
 
-    unfocus(): void {
-        const flow = this.flowRef?.nativeElement, svg = this.edgesRef?.nativeElement;
-        if (!flow || !svg) return;
-        svg.classList.remove('focusing');
-        flow.classList.remove('focusing');
-        flow.querySelectorAll('.hot').forEach(x => x.classList.remove('hot'));
+    // ------------------------------------------------------------------ layout (saved on apply)
+    onMoved(moves: { key: string; x: number; y: number }[]): void {
+        if (this.readOnly || !this.committed) return;
+        // First move: freeze every automatic position so nothing else jumps around.
+        if (Object.keys(this.layoutDraft.nodes).length === 0 || moves.some(mv => !this.layoutDraft.nodes[mv.key])) {
+            const all = buildBoard(this.draft!, {
+                layout: this.layoutDraft, marks: marksFor([]), expanded: this.expanded,
+                filters: {types: {identity: true, service: true, router: true}, attrs: [], search: '', problemsOnly: false},
+            });
+            for (const n of all.nodes) if (!this.layoutDraft.nodes[n.key]) this.layoutDraft.nodes[n.key] = {x: n.x, y: n.y};
+        }
+        for (const mv of moves) this.layoutDraft.nodes[mv.key] = {x: mv.x, y: mv.y};
+        this.syncLayoutPending();
     }
 
-    // ------------------------------------------------------------------ drag and drop
-    onDragStart(ev: DragEvent, src: AcEndpoint): void {
-        if (this.readOnly) { ev.preventDefault(); return; }
-        ev.dataTransfer?.setData('text/plain', JSON.stringify(src));
-        if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'link';
-        this.dragging = true;
+    autoArrange(): void {
+        this.layoutDraft = {v: 1, nodes: {}, groups: [...(this.layoutDraft.groups || [])]};
+        this.syncLayoutPending();
+        requestAnimationFrame(() => this.boardCmp?.fit());
     }
-    onDragEnd(): void { this.dragging = false; this.overKey = ''; }
-    onDragOver(ev: DragEvent, key: string): void {
-        if (this.readOnly) return;
-        ev.preventDefault();
-        if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'link';
-        this.overKey = key;
+
+    private syncLayoutPending(): void {
+        const i = this.pending.findIndex(p => p.id === LAYOUT_SET);
+        if (sameLayout(this.layoutDraft, this.layoutCommitted)) {
+            if (i >= 0) this.pending.splice(i, 1);
+        } else {
+            const moved = Object.keys(this.layoutDraft.nodes).filter(k => {
+                const a = this.layoutDraft.nodes[k], b = this.layoutCommitted.nodes[k];
+                return !b || a.x !== b.x || a.y !== b.y;
+            }).length;
+            const newGroups = (this.layoutDraft.groups || []).filter(g => !(this.layoutCommitted.groups || []).includes(g));
+            const ops: AcOp[] = [{op: 'saveLayout', layout: clone(this.layoutDraft)}];
+            const set: Pending = {
+                id: LAYOUT_SET, title: 'Save canvas layout',
+                summary: [
+                    Object.keys(this.layoutDraft.nodes).length ? `${this.plural(moved, 'position', 'positions')} changed` : 'Back to automatic layout',
+                    newGroups.length ? `new group${newGroups.length > 1 ? 's' : ''} ${newGroups.map(g => '#' + g.split(':').slice(1).join(':')).join(', ')}` : '',
+                    this.canSaveLayout ? 'shared with other admins through a config on the controller' : "your role can't save configs, so applying this will fail",
+                ].filter(Boolean).join('; ') + '.',
+                ops, calls: describeCalls(this.draft || this.committed!, ops),
+            };
+            if (i >= 0) this.pending[i] = set; else this.pending.push(set);
+        }
+        this.refresh();
     }
-    onDrop(ev: DragEvent, tgt: AcEndpoint): void {
-        ev.preventDefault();
-        ev.stopPropagation();
-        this.dragging = false;
-        this.overKey = '';
-        if (this.readOnly) return;
-        try { this.openGrant(JSON.parse(ev.dataTransfer?.getData('text/plain') || ''), tgt); } catch { /* not ours */ }
+
+    // ------------------------------------------------------------------ board events
+    onMemberDrop(ev: MemberDrop): void {
+        const m = this.draft;
+        if (!m || this.readOnly) return;
+        const it = ev.item, t = ev.target;
+        const ent = {kind: it.kind!, id: it.id!, name: it.name || ''};
+        if (t.type === 'empty') {
+            if (it.type === 'member') this.queueIntent(moveMember(m, ent, it.attr, null, false));
+            return;
+        }
+        if (it.kind === 'identity' && t.kind === 'service') {
+            this.openGrant({kind: 'identity', id: it.id}, t.type === 'group' ? {kind: 'group', attr: t.attr} : {kind: 'service', id: t.id});
+            return;
+        }
+        if (t.kind !== it.kind) {
+            this.toast('warning', "Can't drop there", `Drop ${KIND_LABEL[it.kind!][1]} into an ${KIND_LABEL[it.kind!][0]} group${it.kind === 'identity' ? ', or onto a service to give access' : ''}.`);
+            return;
+        }
+        if (t.type === 'group' || t.type === 'member') {
+            this.queueIntent(moveMember(m, ent, it.type === 'member' ? it.attr : undefined, t.attr, ev.copy));
+        } else {
+            this.toast('info', 'Drop into a group', 'To give it the same access, copy it (⌘C), select the other card and paste (⌘V).');
+        }
+    }
+
+    onNodeDrop(ev: NodeDrop): void {
+        const it = ev.item, t = ev.target;
+        if (this.readOnly || t.type === 'empty' || it.kind !== 'identity' || t.kind !== 'service') return;
+        const src: AcEndpoint = it.type === 'group' ? {kind: 'group', attr: it.attr} : {kind: 'identity', id: it.id};
+        const tgt: AcEndpoint = t.type === 'group' ? {kind: 'group', attr: t.attr} : {kind: 'service', id: t.id};
+        this.openGrant(src, tgt);
+    }
+
+    onCommand(c: BoardCommand): void {
+        const m = this.draft;
+        if (!m) return;
+        switch (c.cmd) {
+            case 'copy': case 'cut': return this.toClipboard(c.cmd, c.items);
+            case 'paste': return this.paste(c.items, c.at);
+            case 'delete': return this.deleteSelection(c.items);
+            case 'give': {
+                const i = c.items.find(x => x.kind === 'identity');
+                if (i) this.openGrant(i.type === 'group' ? {kind: 'group', attr: i.attr} : {kind: 'identity', id: i.id}, null);
+                return;
+            }
+            case 'advise': return this.adviseFor(c.items[0]);
+            case 'open': return this.openItem(c.items[0]);
+            case 'select': {
+                const g = c.items.find(x => x.type === 'group');
+                const n = g && this.board.nodes.find(x => x.key === g.node);
+                if (n && this.boardCmp) { this.boardCmp.selected = new Set(n.shown.map(x => `m|${n.key}|${x.id}`)); this.boardCmp.closeMenu(); }
+                return;
+            }
+            case 'undo': {
+                const last = this.pending[this.pending.length - 1];
+                if (last) { this.discard(last.id); this.toast('info', 'Pending change removed', last.title); }
+                return;
+            }
+            case 'arrange': return this.autoArrange();
+            case 'newGroup': if (!this.readOnly) this.newGroup = {kind: 'identity', attr: '', at: c.at}; return;
+            case 'expand': {
+                this.expanded.has(c.node) ? this.expanded.delete(c.node) : this.expanded.add(c.node);
+                return this.refresh();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ clipboard
+    private clipItems(items: SelItem[]): ClipItem[] {
+        const m = this.draft!;
+        const out: ClipItem[] = [];
+        const add = (kind: AcKind, id: string, fromAttr?: string) => {
+            const e = entitiesOf(m, kind).find(x => x.id === id);
+            if (e && !out.some(o => o.kind === kind && o.id === id && o.fromAttr === fromAttr)) out.push({kind, id, name: e.name, attrs: [...e.attrs], fromAttr});
+        };
+        for (const it of items) {
+            if (it.type === 'member') add(it.kind!, it.id!, it.attr);
+            else if (it.type === 'free') add(it.kind!, it.id!);
+            else if (it.type === 'group') {
+                const n = this.board.nodes.find(x => x.key === it.node);
+                n?.members.forEach(x => add(it.kind!, x.id, it.attr));
+            }
+        }
+        return out;
+    }
+
+    private toClipboard(mode: 'copy' | 'cut', items: SelItem[]): void {
+        if (mode === 'cut' && this.readOnly) return;
+        const ci = this.clipItems(items);
+        if (!ci.length) { this.toast('info', 'Nothing to ' + mode, 'Select identities, services or routers (or a group) first.'); return; }
+        this.clip = {mode, items: ci};
+        this.toast('info', `${mode === 'cut' ? 'Cut' : 'Copied'} ${ci.length === 1 ? ci[0].name : ci.length + ' items'}`,
+            'Paste into a group, onto another card (same access), or on empty canvas (a new copy).');
+    }
+
+    private paste(targets: SelItem[], at: { x: number; y: number }): void {
+        const m = this.draft;
+        if (!m || this.readOnly) return;
+        if (!this.clip) { this.toast('info', 'Clipboard is empty', 'Copy (⌘C) or cut (⌘X) something first.'); return; }
+        const groupsSel = targets.filter(t => t.type === 'group');
+        const entities = targets.filter(t => t.type === 'member' || t.type === 'free');
+        let res: IntentResult;
+        if (groupsSel.length) {
+            const ops: AcOp[] = [];
+            let first: IntentResult | null = null;
+            for (const g of groupsSel) {
+                const r = pasteIntoGroup(m, this.clip, g.kind!, g.attr!);
+                if ('error' in r) { first = first || r; continue; }
+                first = first && !('error' in first) ? first : r;
+                ops.push(...r.ops);
+            }
+            res = ops.length && first && !('error' in first) ? {...first, ops} : (first || {error: 'Nothing to paste.'});
+        } else if (entities.length) {
+            res = pasteOntoEntities(m, this.clip, entities.map(e => ({kind: e.kind!, id: e.id!})));
+        } else {
+            const r = pasteAsNew(m, this.clip, this.newId);
+            if (!('error' in r)) {
+                // New items without attributes would float freely: put them where the user pasted.
+                let dy = 0;
+                for (const c of r.created || []) {
+                    const op = r.ops.find(o => (o.op === 'createIdentity' && o.identity.id === c.id) || (o.op === 'createService' && o.service.id === c.id));
+                    const attrs = op?.op === 'createIdentity' ? op.identity.attrs : op?.op === 'createService' ? op.service.attrs : [];
+                    if (!attrs.length) { this.layoutDraft.nodes[freeKey(c.kind, c.id)] = {x: Math.round(at.x), y: Math.round(at.y + dy)}; dy += 50; }
+                }
+            }
+            res = r;
+        }
+        if (this.queueIntent(res) && this.clip.mode === 'cut') this.clip = null;
+        if (Object.keys(this.layoutDraft.nodes).some(k => !this.layoutCommitted.nodes[k])) this.syncLayoutPending();
+    }
+
+    private deleteSelection(items: SelItem[]): void {
+        const m = this.draft;
+        if (!m || this.readOnly) return;
+        const members = items.filter(i => i.type === 'member').map(i => ({kind: i.kind!, id: i.id!, name: i.name || '', attr: i.attr!}));
+        if (members.length) { this.queueIntent(removeFromGroups(m, members)); return; }
+        const emptyNew = items.filter(i => i.type === 'group' && (this.layoutDraft.groups || []).includes(`${i.kind}:${i.attr}`)
+            && !this.board.nodes.find(n => n.key === i.node)?.members.length);
+        if (emptyNew.length) {
+            this.layoutDraft.groups = (this.layoutDraft.groups || []).filter(g => !emptyNew.some(i => g === `${i.kind}:${i.attr}`));
+            emptyNew.forEach(i => delete this.layoutDraft.nodes[i.node]);
+            this.syncLayoutPending();
+            return;
+        }
+        this.toast('info', 'Nothing removed', 'Delete takes selected cards out of their group. A group disappears when nothing uses it; identities and services are never deleted here.');
+    }
+
+    // ------------------------------------------------------------------ new group
+    createGroup(): void {
+        const g = this.newGroup;
+        if (!g) return;
+        const attr = g.attr.trim().replace(/^#/, '');
+        if (!attr || /\s/.test(attr)) { this.toast('warning', 'Invalid name', 'Use a single word without spaces, such as sales or web-servers.'); return; }
+        const id = `${g.kind}:${attr}`;
+        if (this.board.nodes.some(n => n.key === groupKey(g.kind, attr)) || (this.layoutDraft.groups || []).includes(id)) {
+            this.toast('info', 'Already exists', `#${attr} is already on the canvas.`);
+        } else {
+            this.layoutDraft.groups = [...(this.layoutDraft.groups || []), id];
+            this.layoutDraft.nodes[groupKey(g.kind, attr)] = {x: Math.round(g.at.x), y: Math.round(g.at.y)};
+            this.syncLayoutPending();
+        }
+        this.newGroup = null;
+    }
+
+    // ------------------------------------------------------------------ advisor / navigation
+    private adviseFor(it?: SelItem): void {
+        if (!it || !it.id) return;
+        if (it.kind === 'identity') this.advisorI = it.id;
+        else if (it.kind === 'service') this.advisorS = it.id;
+        else return;
+        this.runAdvisor();
+        this.drawer = 'advisor';
+    }
+
+    private openItem(it?: SelItem): void {
+        if (!it) return;
+        if (it.id && it.id.startsWith('new-')) { this.toast('info', 'Not created yet', 'Apply pending changes first.'); return; }
+        if (it.type === 'hub') {
+            const fam = it.node.split(':')[1];
+            if (it.policy?.startsWith('new-')) { this.toast('info', 'Not created yet', 'Apply pending changes first.'); return; }
+            this.router.navigate([fam === 'erp' ? '/router-policies' : fam === 'serp' ? '/service-router-policies' : '/service-policies', it.policy]);
+        } else if (it.id) {
+            this.router.navigate([it.kind === 'service' ? '/services' : it.kind === 'router' ? '/routers' : '/identities', it.id]);
+        }
+    }
+
+    // ------------------------------------------------------------------ template helpers
+    plural(n: number, one: string, many: string): string { return `${n} ${n === 1 ? one : many}`; }
+    toggleConcept(c: string): void { this.shownConcepts.has(c) ? this.shownConcepts.delete(c) : this.shownConcepts.add(c); }
+    toggleGuide(): void { this.guideOpen = !this.guideOpen; }
+    go(route: string): void { this.router.navigate([route]); }
+    get pendingCalls(): number { return this.pending.reduce((n, c) => n + c.ops.length, 0); }
+    get nextGuide(): AcGuideStep | undefined { return this.guide.find(s => !s.done); }
+    get clipLabel(): string {
+        const c = this.clip;
+        return c ? `${c.mode === 'cut' ? 'Cut' : 'Copied'}: ${c.items.length === 1 ? c.items[0].name : c.items.length + ' items'}` : '';
     }
 
     // ------------------------------------------------------------------ grant dialog
     openGrant(src: AcEndpoint, tgt: AcEndpoint | null): void {
+        if (this.readOnly) return;
         this.dialog = {src, tgt, selected: 0};
         this.computeGrant();
     }
     closeGrant(): void { this.dialog = null; }
 
-    dialogTarget = '';
     get targetChoices(): { value: string; label: string; group: string }[] {
         if (!this.draft) return [];
         return [
@@ -362,11 +601,25 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
         this.dialog = null;
     }
 
+    // ------------------------------------------------------------------ pending changes
+    /** Queues an intent from the board; returns false (with a message) when it can't be done. */
+    private queueIntent(r: IntentResult): boolean {
+        if ('error' in r) { this.toast('warning', 'Not changed', r.error); return false; }
+        this.queue(r.title, r.summary, r.ops);
+        return true;
+    }
+
     private queue(title: string, summary: string, ops: AcOp[]): void {
         if (!this.draft) return;
-        this.pending.push({id: 'c' + this.seq++, title, summary, ops, calls: describeCalls(this.draft, ops)});
+        const set: Pending = {id: 'c' + this.seq++, title, summary, ops, calls: describeCalls(this.draft, ops)};
+        // Access changes go before the layout save, which always runs last.
+        const li = this.pending.findIndex(p => p.id === LAYOUT_SET);
+        if (li >= 0) this.pending.splice(li, 0, set); else this.pending.push(set);
         this.refresh();
-        this.toast('info', 'Added to pending changes', title);
+        this.pulse = false;
+        clearTimeout(this.pulseTimer);
+        requestAnimationFrame(() => { this.pulse = true; this.cdr.markForCheck(); });
+        this.pulseTimer = setTimeout(() => { this.pulse = false; this.cdr.markForCheck(); }, 1600);
     }
 
     allowAllRouters(): void {
@@ -375,20 +628,29 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
             [{op: 'createErPolicy', policy: {id: this.newId(), name: 'all-identities-all-routers', semantic: 'AnyOf', identityRoles: ['#all'], routerRoles: ['#all']}}]);
     }
 
-    discard(id: string): void { this.pending = this.pending.filter(c => c.id !== id); this.refresh(); }
-    discardAll(): void { this.pending = []; this.refresh(); }
+    discard(id: string): void {
+        if (id === LAYOUT_SET) this.layoutDraft = clone(this.layoutCommitted);
+        this.pending = this.pending.filter(c => c.id !== id);
+        this.refresh();
+    }
+    discardAll(): void {
+        this.pending = [];
+        this.layoutDraft = clone(this.layoutCommitted);
+        this.refresh();
+    }
 
     async applyAll(): Promise<void> {
         if (!this.committed || !this.pending.length || this.readOnly || this.busy) return;
         this.busy = true;
-        const sets = [...this.pending];
+        const sets = [...this.pending.filter(p => p.id !== LAYOUT_SET), ...this.pending.filter(p => p.id === LAYOUT_SET)];
+        const idMap = new Map<string, string>();
         let done = 0;
         try {
             for (const c of sets) {
                 // Re-read between sets so each one patches the latest attributes and roles.
                 if (done) this.committed = await this.svc.load();
                 try {
-                    const reverts = await this.svc.apply(this.committed!, c.ops);
+                    const reverts = await this.svc.apply(this.committed!, c.ops, idMap);
                     this.history.push({title: c.title, reverts});
                     this.pending = this.pending.filter(p => p.id !== c.id);
                     done++;
@@ -441,9 +703,7 @@ export class AccessCanvasComponent implements OnInit, AfterViewChecked, OnDestro
     }
     get advisorIdentity() { return this.draft?.identities.find(i => i.id === this.advisorI); }
     get advisorService() { return this.draft?.services.find(s => s.id === this.advisorS); }
-    pickIdentity(id: string): void { this.advisorI = id; this.runAdvisor(); }
-    pickService(id: string): void { this.advisorS = id; this.runAdvisor(); }
-    openIdentity(): void { if (this.advisorI) this.router.navigate(['/identities', this.advisorI]); }
+    openIdentity(): void { if (this.advisorI && !this.advisorI.startsWith('new-')) this.router.navigate(['/identities', this.advisorI]); }
 
     // ------------------------------------------------------------------ misc
     private toast(level: string, title: string, content: string): void {

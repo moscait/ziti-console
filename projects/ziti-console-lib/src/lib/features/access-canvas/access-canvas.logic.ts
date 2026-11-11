@@ -23,9 +23,14 @@
  */
 
 export type Semantic = 'AnyOf' | 'AllOf';
+export type AcKind = 'identity' | 'service' | 'router';
 
 export interface AcIdentity { id: string; name: string; attrs: string[]; enrolled: boolean; online: boolean; isAdmin: boolean; }
-export interface AcService { id: string; name: string; attrs: string[]; }
+export interface AcService {
+    id: string; name: string; attrs: string[];
+    // Kept so a pasted copy can reuse the same configs and settings.
+    configs?: string[]; encryptionRequired?: boolean; terminatorStrategy?: string;
+}
 export interface AcRouter { id: string; name: string; attrs: string[]; online: boolean; }
 export interface AcServicePolicy {
     id: string; name: string; type: 'Dial' | 'Bind'; semantic: Semantic;
@@ -43,11 +48,41 @@ export interface AcModel {
     serps: AcSerp[];
 }
 
+/** Canvas positions, shared through a config on the controller. Keys are canvas node keys. */
+export interface AcLayout {
+    v: 1;
+    nodes: Record<string, { x: number; y: number }>;
+    /** Groups created on the canvas that may not have members yet, as "kind:attr". */
+    groups?: string[];
+}
+
+export interface AcNewIdentity { id: string; name: string; attrs: string[]; }
+export interface AcNewService {
+    id: string; name: string; attrs: string[];
+    configs: string[]; encryptionRequired: boolean; terminatorStrategy: string;
+}
+
 export type AcOp =
-    | { op: 'addAttr'; identity: string; attr: string }
+    | { op: 'addAttr'; kind: AcKind; id: string; attr: string }
+    | { op: 'removeAttr'; kind: AcKind; id: string; attr: string }
     | { op: 'addIdentityRole'; policy: string; role: string }
     | { op: 'createPolicy'; policy: AcServicePolicy }
-    | { op: 'createErPolicy'; policy: AcErPolicy };
+    | { op: 'createErPolicy'; policy: AcErPolicy }
+    | { op: 'createIdentity'; identity: AcNewIdentity }
+    | { op: 'createService'; service: AcNewService }
+    | { op: 'saveLayout'; layout: AcLayout };
+
+/** Management API collection for each kind. */
+export const KIND_API: Record<AcKind, string> = { identity: 'identities', service: 'services', router: 'edge-routers' };
+export const KIND_LABEL: Record<AcKind, [string, string]> = {
+    identity: ['identity', 'identities'], service: ['service', 'services'], router: ['router', 'routers'],
+};
+export const LAYOUT_CONFIG_TYPE = 'access-canvas-layout.v1';
+export const LAYOUT_CONFIG_NAME = 'access-canvas-layout';
+
+export function entitiesOf(m: AcModel, kind: AcKind): { id: string; name: string; attrs: string[] }[] {
+    return kind === 'identity' ? m.identities : kind === 'service' ? m.services : m.routers;
+}
 
 export interface AcEndpoint { kind: 'group' | 'identity' | 'service'; attr?: string; id?: string; }
 
@@ -144,8 +179,16 @@ export function groups<T extends Entity>(list: T[]): [string, T[]][] {
 export function applyOps(m: AcModel, ops: AcOp[]): AcModel {
     for (const op of ops) {
         if (op.op === 'addAttr') {
-            const i = m.identities.find(x => x.id === op.identity);
-            if (i && !i.attrs.includes(op.attr)) i.attrs.push(op.attr);
+            const e = entitiesOf(m, op.kind).find(x => x.id === op.id);
+            if (e && !e.attrs.includes(op.attr)) e.attrs.push(op.attr);
+        } else if (op.op === 'removeAttr') {
+            const e = entitiesOf(m, op.kind).find(x => x.id === op.id);
+            if (e) e.attrs = e.attrs.filter(a => a !== op.attr);
+        } else if (op.op === 'createIdentity') {
+            m.identities.push({ id: op.identity.id, name: op.identity.name, attrs: [...op.identity.attrs], enrolled: false, online: false, isAdmin: false });
+        } else if (op.op === 'createService') {
+            const s = op.service;
+            m.services.push({ id: s.id, name: s.name, attrs: [...s.attrs], configs: [...s.configs], encryptionRequired: s.encryptionRequired, terminatorStrategy: s.terminatorStrategy });
         } else if (op.op === 'addIdentityRole') {
             const p = m.servicePolicies.find(x => x.id === op.policy);
             if (p && !p.identityRoles.includes(op.role)) p.identityRoles.push(op.role);
@@ -164,9 +207,16 @@ export function describeCalls(base: AcModel, ops: AcOp[]): string[] {
     const out: string[] = [];
     for (const op of ops) {
         applyOps(m, [op]);
-        if (op.op === 'addAttr') {
-            const i = m.identities.find(x => x.id === op.identity)!;
-            out.push(`PATCH ${MGMT}/identities/${i.id}\n{ "roleAttributes": ${JSON.stringify(i.attrs)} }`);
+        if (op.op === 'addAttr' || op.op === 'removeAttr') {
+            const e = entitiesOf(m, op.kind).find(x => x.id === op.id);
+            if (e) out.push(`PATCH ${MGMT}/${KIND_API[op.kind]}/${e.id}\n{ "roleAttributes": ${JSON.stringify(e.attrs)} }`);
+        } else if (op.op === 'createIdentity') {
+            out.push(`POST ${MGMT}/identities\n${JSON.stringify(identityBody(op.identity), null, 2)}`);
+        } else if (op.op === 'createService') {
+            out.push(`POST ${MGMT}/services\n${JSON.stringify(serviceBody(op.service), null, 2)}`);
+        } else if (op.op === 'saveLayout') {
+            out.push(`PATCH ${MGMT}/configs/<${LAYOUT_CONFIG_NAME}>   (created, with config type ${LAYOUT_CONFIG_TYPE}, if missing)\n` +
+                `{ "data": { …positions of ${Object.keys(op.layout.nodes).length} canvas items } }`);
         } else if (op.op === 'addIdentityRole') {
             const p = m.servicePolicies.find(x => x.id === op.policy)!;
             out.push(`PATCH ${MGMT}/service-policies/${p.id}\n{ "identityRoles": ${JSON.stringify(p.identityRoles)} }`);
@@ -185,6 +235,13 @@ export const policyBody = (p: AcServicePolicy) => ({
 });
 export const erPolicyBody = (p: AcErPolicy) => ({
     name: p.name, semantic: p.semantic, identityRoles: p.identityRoles, edgeRouterRoles: p.routerRoles,
+});
+export const identityBody = (i: AcNewIdentity) => ({
+    name: i.name, type: 'Default', isAdmin: false, roleAttributes: i.attrs, enrollment: { ott: true },
+});
+export const serviceBody = (s: AcNewService) => ({
+    name: s.name, roleAttributes: s.attrs, configs: s.configs,
+    encryptionRequired: s.encryptionRequired, terminatorStrategy: s.terminatorStrategy,
 });
 
 export function impact(base: AcModel, ops: AcOp[], tgtServiceIds: string[]): AcImpact {
@@ -230,12 +287,12 @@ export function buildOptions(m: AcModel, src: AcEndpoint, tgt: AcEndpoint, newId
             seen.add(r);
             base('attr', 0, `Add ${r} to ${i.name}`,
                 `${i.name} joins the ${r} group. ${p.name} already lets that group dial ${rl(p.serviceRoles)}.`,
-                [{ op: 'addAttr', identity: i.id, attr: r.slice(1) }]);
+                [{ op: 'addAttr', kind: 'identity', id: i.id, attr: r.slice(1) }]);
         }
         const newAttr = `${tgtSlug}-users`;
         base('newattr', 1, `Create group #${newAttr} for ${tgtLabel}`,
             `Gives ${i.name} #${newAttr} and creates a Dial policy for that group, so the next person needs only the attribute.`,
-            [{ op: 'addAttr', identity: i.id, attr: newAttr },
+            [{ op: 'addAttr', kind: 'identity', id: i.id, attr: newAttr },
              { op: 'createPolicy', policy: { id: newId(), name: `${newAttr}-dial`, type: 'Dial', semantic: 'AnyOf', identityRoles: ['#' + newAttr], serviceRoles: [tgtRole], posture: [] } }]);
         base('oneoff', 3, `One-off policy for ${i.name}`,
             `A Dial policy naming ${i.name} directly. Fine for a one-time exception, but it doesn't scale and hides intent.`,

@@ -18,9 +18,10 @@ import {Inject, Injectable} from '@angular/core';
 import {ZITI_DATA_SERVICE, ZitiDataService} from '../../services/ziti-data.service';
 import {ManagementPermissionsService} from '../../services/management-permissions.service';
 import {
-    AcErPolicy, AcIdentity, AcModel, AcOp, AcRouter, AcSerp, AcService, AcServicePolicy,
-    erPolicyBody, policyBody,
+    AcErPolicy, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcRouter, AcSerp, AcService, AcServicePolicy,
+    KIND_API, LAYOUT_CONFIG_NAME, LAYOUT_CONFIG_TYPE, entitiesOf, erPolicyBody, identityBody, policyBody, serviceBody,
 } from './access-canvas.logic';
+import {emptyLayout, remapLayout} from './canvas-board.logic';
 
 /** One request that undoes one applied op. */
 export interface AcRevert { label: string; run: () => Promise<any>; }
@@ -42,6 +43,12 @@ export class AccessCanvasService {
         return p.canUpdate('identities') && p.canCreate('service-policies') && p.canUpdate('service-policies') && p.canCreate('edge-router-policies');
     }
 
+    /** True when the canvas layout can be saved on the controller (a config of its own config type). */
+    canSaveLayout(): boolean {
+        const p = this.permissions;
+        return p.canCreate('configs') && p.canUpdate('configs') && p.canCreate('config-types');
+    }
+
     private async all(type: string): Promise<any[]> {
         const out: any[] = [];
         for (let page = 1; page < 1000; page++) {
@@ -60,27 +67,33 @@ export class AccessCanvasService {
             this.all('identities'), this.all('services'), this.all('edge-routers'),
             this.all('service-policies'), this.all('edge-router-policies'), this.all('service-edge-router-policies'),
         ]);
-        const identities: AcIdentity[] = ids.map(i => ({
+        // Policies the controller creates for itself (a router's own "-system" policy) aren't the admin's to change.
+        const own = (p: any) => !p.isSystem;
+        // Router identities are shown as routers, not as identities.
+        const identities: AcIdentity[] = ids.filter(i => (i.typeId || i.type?.name || i.type?.id) !== 'Router').map(i => ({
             id: i.id, name: i.name, attrs: i.roleAttributes || [],
             // Pending enrollments are listed under `enrollment`; an enrolled identity has an authenticator.
             enrolled: !isEmptyObj(i.authenticators) || isEmptyObj(i.enrollment),
             online: !!i.hasEdgeRouterConnection,
             isAdmin: !!i.isAdmin,
         }));
-        const services: AcService[] = svcs.map(s => ({id: s.id, name: s.name, attrs: s.roleAttributes || []}));
+        const services: AcService[] = svcs.map(s => ({
+            id: s.id, name: s.name, attrs: s.roleAttributes || [],
+            configs: s.configs || [], encryptionRequired: s.encryptionRequired !== false, terminatorStrategy: s.terminatorStrategy || 'smartrouting',
+        }));
         const routers: AcRouter[] = ers.map(r => ({id: r.id, name: r.name, attrs: r.roleAttributes || [], online: !!r.isOnline}));
-        const servicePolicies: AcServicePolicy[] = sps.map(p => ({
+        const servicePolicies: AcServicePolicy[] = sps.filter(own).map(p => ({
             id: p.id, name: p.name, type: p.type, semantic: p.semantic || 'AnyOf',
             identityRoles: p.identityRoles || [], serviceRoles: p.serviceRoles || [],
             posture: p.postureCheckRolesDisplay?.length
                 ? p.postureCheckRolesDisplay.map((x: any) => x.name || x.role)
                 : (p.postureCheckRoles || []),
         }));
-        const erPolicies: AcErPolicy[] = erps.map(p => ({
+        const erPolicies: AcErPolicy[] = erps.filter(own).map(p => ({
             id: p.id, name: p.name, semantic: p.semantic || 'AnyOf',
             identityRoles: p.identityRoles || [], routerRoles: p.edgeRouterRoles || [],
         }));
-        const serpsOut: AcSerp[] = serps.map(p => ({
+        const serpsOut: AcSerp[] = serps.filter(own).map(p => ({
             id: p.id, name: p.name, semantic: p.semantic || 'AnyOf',
             serviceRoles: p.serviceRoles || [], routerRoles: p.edgeRouterRoles || [],
         }));
@@ -92,19 +105,43 @@ export class AccessCanvasService {
      * ops that succeeded; on failure the error is thrown with `reverts` attached so the caller
      * can roll back what already went through.
      */
-    async apply(committed: AcModel, ops: AcOp[]): Promise<AcRevert[]> {
+    async apply(committed: AcModel, ops: AcOp[], idMap: Map<string, string> = new Map()): Promise<AcRevert[]> {
         const reverts: AcRevert[] = [];
         // Attributes and roles accumulate across ops on the same entity.
-        const attrs = new Map(committed.identities.map(i => [i.id, [...i.attrs]]));
+        const attrs = new Map<string, string[]>();
+        for (const kind of ['identity', 'service', 'router'] as AcKind[]) {
+            for (const e of entitiesOf(committed, kind)) attrs.set(`${kind}:${e.id}`, [...e.attrs]);
+        }
         const roles = new Map(committed.servicePolicies.map(p => [p.id, [...p.identityRoles]]));
         try {
             for (const op of ops) {
-                if (op.op === 'addAttr') {
-                    const before = attrs.get(op.identity) || [];
-                    const after = before.includes(op.attr) ? before : [...before, op.attr];
-                    await this.data.patch('identities', {roleAttributes: after}, op.identity);
-                    attrs.set(op.identity, after);
-                    reverts.unshift({label: `restore attributes on identity ${op.identity}`, run: () => this.data.patch('identities', {roleAttributes: before}, op.identity)});
+                if (op.op === 'addAttr' || op.op === 'removeAttr') {
+                    const id = idMap.get(op.id) || op.id, key = `${op.kind}:${id}`, api = KIND_API[op.kind];
+                    const before = attrs.get(key) || [];
+                    const after = op.op === 'addAttr'
+                        ? (before.includes(op.attr) ? before : [...before, op.attr])
+                        : before.filter(a => a !== op.attr);
+                    await this.data.patch(api, {roleAttributes: after}, id);
+                    attrs.set(key, after);
+                    reverts.unshift({label: `restore attributes on ${op.kind} ${id}`, run: () => this.data.patch(api, {roleAttributes: before}, id)});
+                } else if (op.op === 'createIdentity') {
+                    const res = await this.data.post('identities', identityBody(op.identity));
+                    const id = res?.data?.id;
+                    if (id) {
+                        idMap.set(op.identity.id, id);
+                        attrs.set(`identity:${id}`, [...op.identity.attrs]);
+                        reverts.unshift({label: `delete identity ${op.identity.name}`, run: () => this.data.delete('identities', id)});
+                    }
+                } else if (op.op === 'createService') {
+                    const res = await this.data.post('services', serviceBody(op.service));
+                    const id = res?.data?.id;
+                    if (id) {
+                        idMap.set(op.service.id, id);
+                        attrs.set(`service:${id}`, [...op.service.attrs]);
+                        reverts.unshift({label: `delete service ${op.service.name}`, run: () => this.data.delete('services', id)});
+                    }
+                } else if (op.op === 'saveLayout') {
+                    reverts.unshift(await this.saveLayout(remapLayout(op.layout, idMap)));
                 } else if (op.op === 'addIdentityRole') {
                     const before = roles.get(op.policy) || [];
                     const after = before.includes(op.role) ? before : [...before, op.role];
@@ -114,11 +151,17 @@ export class AccessCanvasService {
                 } else if (op.op === 'createPolicy') {
                     const res = await this.data.post('service-policies', policyBody(op.policy));
                     const id = res?.data?.id;
-                    if (id) reverts.unshift({label: `delete service policy ${op.policy.name}`, run: () => this.data.delete('service-policies', id)});
+                    if (id) {
+                        idMap.set(op.policy.id, id);
+                        reverts.unshift({label: `delete service policy ${op.policy.name}`, run: () => this.data.delete('service-policies', id)});
+                    }
                 } else if (op.op === 'createErPolicy') {
                     const res = await this.data.post('edge-router-policies', erPolicyBody(op.policy));
                     const id = res?.data?.id;
-                    if (id) reverts.unshift({label: `delete edge router policy ${op.policy.name}`, run: () => this.data.delete('edge-router-policies', id)});
+                    if (id) {
+                        idMap.set(op.policy.id, id);
+                        reverts.unshift({label: `delete edge router policy ${op.policy.name}`, run: () => this.data.delete('edge-router-policies', id)});
+                    }
                 }
             }
         } catch (err: any) {
@@ -126,6 +169,49 @@ export class AccessCanvasService {
             throw err;
         }
         return reverts;
+    }
+
+    // ------------------------------------------------------------------ layout
+    private async byName(type: string, name: string): Promise<any | undefined> {
+        const paging = {filter: '', noSearch: false, order: 'asc', page: 1, searchOn: 'name', sort: 'name', total: 10};
+        const res = await this.data.get(type, paging, [{columnId: 'name', type: 'TEXTINPUT', verb: '=', value: name} as any]);
+        return (res?.data || []).find((x: any) => x.name === name);
+    }
+
+    /** The shared canvas layout, or an empty one when it has never been saved (or can't be read). */
+    async loadLayout(): Promise<AcLayout> {
+        try {
+            const cfg = await this.byName('configs', LAYOUT_CONFIG_NAME);
+            const d = cfg?.data;
+            if (d && typeof d === 'object' && d.nodes && typeof d.nodes === 'object') {
+                return {v: 1, nodes: d.nodes, groups: Array.isArray(d.groups) ? d.groups : []};
+            }
+        } catch (err) {
+            console.warn('[access-canvas] could not read the saved layout', err);
+        }
+        return emptyLayout();
+    }
+
+    /** Writes the layout config (creating its config type and config the first time). */
+    private async saveLayout(layout: AcLayout): Promise<AcRevert> {
+        const data = {v: 1, nodes: layout.nodes, groups: layout.groups || []};
+        const existing = await this.byName('configs', LAYOUT_CONFIG_NAME);
+        if (existing) {
+            const before = existing.data;
+            await this.data.patch('configs', {data}, existing.id);
+            return {label: 'restore canvas layout', run: () => this.data.patch('configs', {data: before}, existing.id)};
+        }
+        let type = await this.byName('config-types', LAYOUT_CONFIG_TYPE);
+        if (!type) {
+            const res = await this.data.post('config-types', {
+                name: LAYOUT_CONFIG_TYPE,
+                schema: {type: 'object', description: 'Access Canvas layout: positions of canvas items. Not used by tunnelers.'},
+            });
+            type = {id: res?.data?.id};
+        }
+        const res = await this.data.post('configs', {name: LAYOUT_CONFIG_NAME, configTypeId: type.id, data});
+        const id = res?.data?.id;
+        return {label: 'delete canvas layout', run: () => id ? this.data.delete('configs', id) : Promise.resolve()};
     }
 
     async revert(reverts: AcRevert[]): Promise<void> {
