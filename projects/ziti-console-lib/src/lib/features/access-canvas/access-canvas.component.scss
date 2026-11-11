@@ -181,7 +181,7 @@ lib-access-canvas {
 .ac-change { border: 1px dashed var(--ac-pending); background: var(--ac-pending-soft); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
 .ac-popmenu-end { left: auto; right: 0; }
 .ac-layoutmenu { width: 290px; gap: 8px; justify-items: stretch;
-  .ac-btn { text-align: left; }
+  .ac-btn { width: 100%; box-sizing: border-box; text-align: left; justify-content: flex-start; }
   .ac-small { margin: 0; }
 }
 .ac-filebtn { position: relative; cursor: pointer;
