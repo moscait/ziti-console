@@ -3,9 +3,8 @@
     <h1>Access Canvas</h1>
     <p class="ac-sub">Drag cards between groups, or an identity onto a service. Lines are policies. Nothing changes until you apply.</p>
     <span class="ac-grow"></span>
-    @if (!loading && !loadError) {
-      <button type="button" class="ac-btn ac-guidebtn" (click)="toggleGuide()" [attr.aria-expanded]="guideOpen">
-        Getting started <span class="ac-pill" [class.ok]="guideDone === guide.length">{{ guideDone }}/{{ guide.length }}</span></button>
+    @if (!loading && !loadError && !readOnly) {
+      <button type="button" class="ac-btn primary" (click)="openWizard()">＋ Set up a service</button>
     }
     <div class="ac-pop">
       <button type="button" class="ac-q ac-qbig" (click)="helpOpen = !helpOpen" [attr.aria-expanded]="helpOpen" aria-label="How to use the canvas">?</button>
@@ -33,44 +32,6 @@
   } @else if (loadError) {
     <div class="ac-empty ac-bad">Couldn't load the network: {{ loadError }} <button type="button" class="ac-linkish" (click)="reload()">Try again</button></div>
   } @else {
-
-  @if (guideOpen) {
-  <section class="ac-guide" aria-label="Getting started">
-    <div class="ac-guide-h">
-      <div>
-        <h2>Getting started</h2>
-        <p>{{ guideDone }} of {{ guide.length }} done
-          @if (nextGuide) { · next: {{ nextGuide.t | lowercase }} } @else { · your network is ready }</p>
-      </div>
-      <div class="ac-progress" role="progressbar" aria-label="Getting started progress" aria-valuemin="0" [attr.aria-valuemax]="guide.length" [attr.aria-valuenow]="guideDone">
-        <span [style.width.%]="guide.length ? (guideDone / guide.length) * 100 : 0"></span>
-      </div>
-      <button type="button" class="ac-icon-btn" (click)="toggleGuide()">Hide</button>
-    </div>
-    @if (true) {
-      <ol class="ac-gsteps">
-        @for (s of guide; track s.id) {
-          <li [class.done]="s.done" [class.next]="s === nextGuide">
-            <span class="ac-tick" aria-hidden="true">{{ s.done ? '✓' : '' }}</span>
-            <div>
-              <b>{{ s.t }}</b>@if (s.done) {<span class="ac-sr"> (done)</span>}
-              <div class="ac-small">{{ s.d }}</div>
-              @if (!s.done && (s.link || s.action)) {
-                <div class="ac-acts">
-                  @if (s.link) { <button type="button" class="ac-btn" (click)="go(s.link.route)">{{ s.link.label }}</button> }
-                  @if (s.action === 'allow-routers' && !readOnly) {
-                    <button type="button" class="ac-btn" (click)="allowAllRouters()">Allow all identities on all routers</button>
-                    <span class="ac-small">Creates edge router policy <code>#all → #all</code>, the usual start. Narrow it later.</span>
-                  }
-                </div>
-              }
-            </div>
-          </li>
-        }
-      </ol>
-    }
-  </section>
-  }
 
   <!-- Filters -->
   <div class="ac-toolbar" role="toolbar" aria-label="Canvas filters">
@@ -132,6 +93,14 @@
     <lib-canvas-board [board]="board" [readOnly]="readOnly" [hasClip]="!!clip" [movedKeys]="movedKeys"
                       (moved)="onMoved($event)" (memberDrop)="onMemberDrop($event)" (nodeDrop)="onNodeDrop($event)" (command)="onCommand($event)"></lib-canvas-board>
 
+    @if (draft && !draft.services.length && !pending.length && !readOnly) {
+      <div class="ac-empty-board">
+        <h2>No services yet</h2>
+        <p>Set up the first one: the service, the identity that hosts it, who may use it, and the policies between them.</p>
+        <button type="button" class="ac-btn primary" (click)="openWizard()">＋ Set up a service</button>
+      </div>
+    }
+
     <div class="ac-dock" role="toolbar" aria-label="Changes and checks">
       <button type="button" class="ac-dockbtn" [class.on]="drawer === 'advisor'" [attr.aria-expanded]="drawer === 'advisor'" (click)="toggleDrawer('advisor')"
               title="Why can't an identity reach a service? Double-click a card to check it.">
@@ -184,10 +153,18 @@
           }
 
         } @else {
+          @for (f of followUps; track $index) {
+            <div class="ac-follow">
+              <div class="ac-change-h"><b>To finish: {{ f.title }}</b>
+                <button type="button" class="ac-icon-btn" (click)="dismissFollowUp($index)">Done</button></div>
+              <ol>@for (st of f.steps; track $index) { <li>{{ st }}</li> }</ol>
+            </div>
+          }
           <p class="ac-lede">Nothing is sent to the controller until you apply. Changes go in this order; the canvas layout is saved last.</p>
           @for (c of pending; track c.id) {
             <div class="ac-change" [class.layout]="c.id === 'layout'">
-              <div class="ac-change-h"><div><b>{{ c.title }}</b><div class="ac-small">{{ c.summary }}</div></div>
+              <div class="ac-change-h"><div><b>{{ c.title }}</b><div class="ac-small">{{ c.summary }}</div>
+                @if (c.next?.length) { <div class="ac-small">After applying: {{ plural(c.next!.length, 'step', 'steps') }} by hand (shown here once applied).</div> }</div>
                 <button type="button" class="ac-icon-btn" (click)="discard(c.id)" [disabled]="busy">Discard</button></div>
               <details class="ac-api"><summary>{{ plural(c.calls.length, 'API call', 'API calls') }}</summary><pre>{{ c.calls.join('\n\n') }}</pre></details>
             </div>
@@ -217,6 +194,11 @@
   </section>
   }
 </div>
+
+<!-- Set-up wizard -->
+@if (wizardOpen && draft) {
+  <lib-access-wizard [model]="draft" [newId]="wizardId" (queued)="onWizardQueued($event)" (closed)="wizardOpen = false"></lib-access-wizard>
+}
 
 <!-- Problems dialog -->
 @if (problemsOpen) {

@@ -22,16 +22,18 @@ import {GrowlerService} from '../messaging/growler.service';
 import {GrowlerModel} from '../messaging/growler.model';
 import {AccessCanvasService, AcRevert} from './access-canvas.service';
 import {
-    AcEndpoint, AcGrantResult, AcGuideStep, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcStep,
-    CONCEPTS, KIND_LABEL, accessSet, advise, applyOps, buildOptions, clients, clone, describeCalls, entitiesOf, groups, guideSteps,
+    AcEndpoint, AcGrantResult, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcStep,
+    CONCEPTS, KIND_LABEL, accessSet, advise, applyOps, buildOptions, clients, clone, describeCalls, entitiesOf, groups,
 } from './access-canvas.logic';
 import {
     Board, BoardFilters, Clip, ClipItem, IntentResult, buildBoard, emptyLayout, freeKey, groupKey, marksFor, moveMember,
     pasteAsNew, pasteIntoGroup, pasteOntoEntities, removeFromGroups, sameLayout,
 } from './canvas-board.logic';
 import {BoardCommand, CanvasBoardComponent, MemberDrop, NodeDrop, SelItem} from './canvas-board.component';
+import {AccessWizardComponent} from './access-wizard.component';
+import {WizardPlan} from './access-wizard.logic';
 
-interface Pending { id: string; title: string; summary: string; ops: AcOp[]; calls: string[]; }
+interface Pending { id: string; title: string; summary: string; ops: AcOp[]; calls: string[]; next?: string[]; }
 interface Applied { title: string; reverts: AcRevert[]; }
 type ProbKind = 'identity' | 'service' | 'router' | 'policy';
 /** One row in the problems table: one problem on one item. */
@@ -68,7 +70,7 @@ const KINDS: AcKind[] = ['identity', 'service', 'router'];
 @Component({
     selector: 'lib-access-canvas',
     standalone: true,
-    imports: [CommonModule, FormsModule, CanvasBoardComponent],
+    imports: [CommonModule, FormsModule, CanvasBoardComponent, AccessWizardComponent],
     templateUrl: './access-canvas.component.html',
     styleUrls: ['./access-canvas.component.scss'],
     encapsulation: ViewEncapsulation.None,
@@ -108,16 +110,16 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
     clip: Clip | null = null;
 
     shownConcepts = new Set<string>();
-    guideOpen = false;
+    /** The set-up wizard is open. */
+    wizardOpen = false;
+    /** What's left to do by hand after applying wizard changes (enrolling new identities). */
+    followUps: { title: string; steps: string[] }[] = [];
     helpOpen = false;
     /** The panel floating over the right of the board, if open. */
     drawer: 'pending' | 'advisor' | null = null;
     /** Briefly true after a change is queued, so the pending button draws the eye. */
     pulse = false;
     private pulseTimer?: ReturnType<typeof setTimeout>;
-    advisorPassed = false;
-    guide: AcGuideStep[] = [];
-    guideDone = 0;
     advisorClients: { attr: string; members: AcIdentity[] }[] = [];
     advisorI = '';
     advisorS = '';
@@ -189,8 +191,6 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         }));
         this.advisorClients = groups(clients(m)).map(([attr, members]) => ({attr, members}));
         this.runAdvisor();
-        this.guide = guideSteps(m, {pending: this.pending.length, advisorPassed: this.advisorPassed});
-        this.guideDone = this.guide.filter(s => s.done).length;
     }
 
     // ------------------------------------------------------------------ filters
@@ -544,10 +544,8 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
     // ------------------------------------------------------------------ template helpers
     plural(n: number, one: string, many: string): string { return `${n} ${n === 1 ? one : many}`; }
     toggleConcept(c: string): void { this.shownConcepts.has(c) ? this.shownConcepts.delete(c) : this.shownConcepts.add(c); }
-    toggleGuide(): void { this.guideOpen = !this.guideOpen; }
     go(route: string): void { this.router.navigate([route]); }
     get pendingCalls(): number { return this.pending.reduce((n, c) => n + c.ops.length, 0); }
-    get nextGuide(): AcGuideStep | undefined { return this.guide.find(s => !s.done); }
     get clipLabel(): string {
         const c = this.clip;
         return c ? `${c.mode === 'cut' ? 'Cut' : 'Copied'}: ${c.items.length === 1 ? c.items[0].name : c.items.length + ' items'}` : '';
@@ -609,9 +607,9 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         return true;
     }
 
-    private queue(title: string, summary: string, ops: AcOp[]): void {
+    private queue(title: string, summary: string, ops: AcOp[], next?: string[]): void {
         if (!this.draft) return;
-        const set: Pending = {id: 'c' + this.seq++, title, summary, ops, calls: describeCalls(this.draft, ops)};
+        const set: Pending = {id: 'c' + this.seq++, title, summary, ops, calls: describeCalls(this.draft, ops), next};
         // Access changes go before the layout save, which always runs last.
         const li = this.pending.findIndex(p => p.id === LAYOUT_SET);
         if (li >= 0) this.pending.splice(li, 0, set); else this.pending.push(set);
@@ -622,11 +620,18 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         this.pulseTimer = setTimeout(() => { this.pulse = false; this.cdr.markForCheck(); }, 1600);
     }
 
-    allowAllRouters(): void {
-        if (this.readOnly) return;
-        this.queue('Allow all identities on all routers', 'Creates edge router policy #all → #all, the usual starting point. Narrow it later.',
-            [{op: 'createErPolicy', policy: {id: this.newId(), name: 'all-identities-all-routers', semantic: 'AnyOf', identityRoles: ['#all'], routerRoles: ['#all']}}]);
+    // ------------------------------------------------------------------ set-up wizard
+    /** For the wizard: temporary ids from the page's own counter, so they never collide with other pending ones. */
+    readonly wizardId = () => this.newId();
+
+    openWizard(): void { if (!this.readOnly && this.draft) this.wizardOpen = true; }
+
+    onWizardQueued(p: WizardPlan): void {
+        this.wizardOpen = false;
+        this.queue(p.title, p.summary, p.ops, p.next);
+        this.drawer = 'pending';
     }
+    dismissFollowUp(i: number): void { this.followUps.splice(i, 1); }
 
     discard(id: string): void {
         if (id === LAYOUT_SET) this.layoutDraft = clone(this.layoutCommitted);
@@ -652,6 +657,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
                 try {
                     const reverts = await this.svc.apply(this.committed!, c.ops, idMap);
                     this.history.push({title: c.title, reverts});
+                    if (c.next?.length) this.followUps.push({title: c.title, steps: c.next});
                     this.pending = this.pending.filter(p => p.id !== c.id);
                     done++;
                 } catch (err: any) {
@@ -661,6 +667,7 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
                 }
             }
             if (done) this.toast('success', 'Applied', `${this.plural(done, 'change set', 'change sets')} sent to the controller.`);
+            if (done && this.followUps.length) this.drawer = 'pending';
         } finally {
             this.busy = false;
             await this.reload();
@@ -695,11 +702,6 @@ export class AccessCanvasComponent implements OnInit, OnDestroy {
         this.advice = advise(m, i, s);
         this.adviceFail = this.advice.find(x => x.st === 'bad') || null;
         this.advicePosture = this.advice.some(x => x.st === 'info');
-        if (!this.adviceFail && !this.pending.length && !this.advisorPassed) {
-            this.advisorPassed = true;
-            this.guide = guideSteps(m, {pending: this.pending.length, advisorPassed: true});
-            this.guideDone = this.guide.filter(st => st.done).length;
-        }
     }
     get advisorIdentity() { return this.draft?.identities.find(i => i.id === this.advisorI); }
     get advisorService() { return this.draft?.services.find(s => s.id === this.advisorS); }
