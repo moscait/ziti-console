@@ -82,6 +82,21 @@
     @if (filtersActive) { <button type="button" class="ac-linkish" (click)="clearFilters()">Clear filters</button> }
     <span class="ac-grow"></span>
     @if (clip) { <span class="ac-clip" [attr.title]="'Paste with ⌘V / Ctrl+V'">{{ clipLabel }} <button type="button" class="ac-icon-btn" (click)="clip = null" aria-label="Clear clipboard">✕</button></span> }
+    <div class="ac-pop">
+      <button type="button" class="ac-btn" (click)="layoutMenu = !layoutMenu" [attr.aria-expanded]="layoutMenu" aria-haspopup="true"
+              title="Card positions are kept in this browser">Layout ▾</button>
+      @if (layoutMenu) {
+        <div class="ac-menu-catch" (click)="layoutMenu = false"></div>
+        <div class="ac-popmenu ac-popmenu-end ac-layoutmenu" (keydown.escape)="layoutMenu = false">
+          <p class="ac-small">Where you put cards is kept in this browser, for this controller. It never changes access.</p>
+          @if (!readOnly) { <button type="button" class="ac-btn" (click)="autoArrange()">Arrange automatically</button> }
+          <button type="button" class="ac-btn" (click)="exportLayout()">Export layout…</button>
+          <label class="ac-btn ac-filebtn">Import layout…
+            <input type="file" accept="application/json,.json" (change)="importLayout($event)"></label>
+          <p class="ac-small">Export saves the arrangement to a file you can share; Import loads one, e.g. from another admin.</p>
+        </div>
+      }
+    </div>
     <button type="button" class="ac-btn" (click)="refreshAndFit()" [disabled]="busy" title="Reload from the controller and fit the canvas to the screen">Refresh</button>
   </div>
   @if (readOnly) {
@@ -90,7 +105,7 @@
 
   <!-- Board, with the pending changes and the advisor floating over it -->
   <section class="ac-board-wrap" aria-label="Canvas">
-    <lib-canvas-board [board]="board" [readOnly]="readOnly" [hasClip]="!!clip" [movedKeys]="movedKeys"
+    <lib-canvas-board [board]="board" [readOnly]="readOnly" [hasClip]="!!clip"
                       (moved)="onMoved($event)" (memberDrop)="onMemberDrop($event)" (nodeDrop)="onNodeDrop($event)" (command)="onCommand($event)"></lib-canvas-board>
 
     @if (draft && !draft.services.length && !pending.length && !readOnly) {
@@ -160,9 +175,9 @@
               <ol>@for (st of f.steps; track $index) { <li>{{ st }}</li> }</ol>
             </div>
           }
-          <p class="ac-lede">Nothing is sent to the controller until you apply. Changes go in this order; the canvas layout is saved last.</p>
+          <p class="ac-lede">Nothing is sent to the controller until you apply. Changes go in this order. (Moving cards isn't a change: positions are kept in this browser.)</p>
           @for (c of pending; track c.id) {
-            <div class="ac-change" [class.layout]="c.id === 'layout'">
+            <div class="ac-change">
               <div class="ac-change-h"><div><b>{{ c.title }}</b><div class="ac-small">{{ c.summary }}</div>
                 @if (c.next?.length) { <div class="ac-small">After applying: {{ plural(c.next!.length, 'step', 'steps') }} by hand (shown here once applied).</div> }</div>
                 <button type="button" class="ac-icon-btn" (click)="discard(c.id)" [disabled]="busy">Discard</button></div>
@@ -261,7 +276,7 @@
   <div class="ac-backdrop" (click)="newGroup = null"></div>
   <form class="ac-dialog ac-dialog-sm" role="dialog" aria-modal="true" aria-labelledby="ac-ng-title" (keydown.escape)="newGroup = null" (ngSubmit)="createGroup()">
     <h2 id="ac-ng-title">New group</h2>
-    <p class="ac-lede">A group is a role attribute. It's empty until you drag or paste cards into it, and it's kept with the canvas layout until then.</p>
+    <p class="ac-lede">A group is a role attribute. It's empty until you drag or paste cards into it, and until then it's kept with the canvas layout in this browser.</p>
     <label class="ac-field" for="ac-ng-kind">Holds
       <select id="ac-ng-kind" name="kind" [(ngModel)]="newGroup.kind">
         @for (k of kinds; track k) { <option [value]="k">{{ kindLabel[k][1] }}</option> }
