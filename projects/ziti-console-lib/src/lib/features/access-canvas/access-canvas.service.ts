@@ -19,7 +19,7 @@ import {ZITI_DATA_SERVICE, ZitiDataService} from '../../services/ziti-data.servi
 import {ManagementPermissionsService} from '../../services/management-permissions.service';
 import {
     AcErPolicy, AcIdentity, AcKind, AcLayout, AcModel, AcOp, AcRouter, AcSerp, AcService, AcServicePolicy,
-    KIND_API, LAYOUT_CONFIG_NAME, LAYOUT_CONFIG_TYPE, entitiesOf, erPolicyBody, identityBody, policyBody, serviceBody,
+    KIND_API, LAYOUT_CONFIG_NAME, LAYOUT_CONFIG_TYPE, entitiesOf, erPolicyBody, identityBody, policyBody, serpBody, serviceBody,
 } from './access-canvas.logic';
 import {emptyLayout, remapLayout} from './canvas-board.logic';
 
@@ -132,8 +132,26 @@ export class AccessCanvasService {
                         attrs.set(`identity:${id}`, [...op.identity.attrs]);
                         reverts.unshift({label: `delete identity ${op.identity.name}`, run: () => this.data.delete('identities', id)});
                     }
+                } else if (op.op === 'createConfig') {
+                    const type = await this.byName('config-types', op.config.type);
+                    if (!type) throw new Error(`Config type ${op.config.type} not found on the controller`);
+                    const res = await this.data.post('configs', {name: op.config.name, configTypeId: type.id, data: op.config.data});
+                    const id = res?.data?.id;
+                    if (id) {
+                        idMap.set(op.config.id, id);
+                        reverts.unshift({label: `delete config ${op.config.name}`, run: () => this.data.delete('configs', id)});
+                    }
+                } else if (op.op === 'createSerp') {
+                    const res = await this.data.post('service-edge-router-policies', serpBody(op.policy));
+                    const id = res?.data?.id;
+                    if (id) {
+                        idMap.set(op.policy.id, id);
+                        reverts.unshift({label: `delete service router policy ${op.policy.name}`, run: () => this.data.delete('service-edge-router-policies', id)});
+                    }
                 } else if (op.op === 'createService') {
-                    const res = await this.data.post('services', serviceBody(op.service));
+                    // Configs created earlier in this apply have real ids by now.
+                    const body = {...serviceBody(op.service), configs: op.service.configs.map(c => idMap.get(c) || c)};
+                    const res = await this.data.post('services', body);
                     const id = res?.data?.id;
                     if (id) {
                         idMap.set(op.service.id, id);

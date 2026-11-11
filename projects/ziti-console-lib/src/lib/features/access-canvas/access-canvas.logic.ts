@@ -62,12 +62,17 @@ export interface AcNewService {
     configs: string[]; encryptionRequired: boolean; terminatorStrategy: string;
 }
 
+/** A service configuration (intercept.v1 or host.v1) created alongside a service. */
+export interface AcNewConfig { id: string; name: string; type: string; data: any; }
+
 export type AcOp =
     | { op: 'addAttr'; kind: AcKind; id: string; attr: string }
     | { op: 'removeAttr'; kind: AcKind; id: string; attr: string }
     | { op: 'addIdentityRole'; policy: string; role: string }
     | { op: 'createPolicy'; policy: AcServicePolicy }
     | { op: 'createErPolicy'; policy: AcErPolicy }
+    | { op: 'createSerp'; policy: AcSerp }
+    | { op: 'createConfig'; config: AcNewConfig }
     | { op: 'createIdentity'; identity: AcNewIdentity }
     | { op: 'createService'; service: AcNewService }
     | { op: 'saveLayout'; layout: AcLayout };
@@ -196,6 +201,8 @@ export function applyOps(m: AcModel, ops: AcOp[]): AcModel {
             m.servicePolicies.push(clone(op.policy));
         } else if (op.op === 'createErPolicy') {
             m.erPolicies.push(clone(op.policy));
+        } else if (op.op === 'createSerp') {
+            m.serps.push(clone(op.policy));
         }
     }
     return m;
@@ -224,6 +231,10 @@ export function describeCalls(base: AcModel, ops: AcOp[]): string[] {
             out.push(`POST ${MGMT}/service-policies\n${JSON.stringify(policyBody(op.policy), null, 2)}`);
         } else if (op.op === 'createErPolicy') {
             out.push(`POST ${MGMT}/edge-router-policies\n${JSON.stringify(erPolicyBody(op.policy), null, 2)}`);
+        } else if (op.op === 'createSerp') {
+            out.push(`POST ${MGMT}/service-edge-router-policies\n${JSON.stringify(serpBody(op.policy), null, 2)}`);
+        } else if (op.op === 'createConfig') {
+            out.push(`POST ${MGMT}/configs   (config type ${op.config.type})\n${JSON.stringify({name: op.config.name, data: op.config.data}, null, 2)}`);
         }
     }
     return out;
@@ -235,6 +246,9 @@ export const policyBody = (p: AcServicePolicy) => ({
 });
 export const erPolicyBody = (p: AcErPolicy) => ({
     name: p.name, semantic: p.semantic, identityRoles: p.identityRoles, edgeRouterRoles: p.routerRoles,
+});
+export const serpBody = (p: AcSerp) => ({
+    name: p.name, semantic: p.semantic, serviceRoles: p.serviceRoles, edgeRouterRoles: p.routerRoles,
 });
 export const identityBody = (i: AcNewIdentity) => ({
     name: i.name, type: 'Default', isAdmin: false, roleAttributes: i.attrs, enrollment: { ott: true },
@@ -366,37 +380,6 @@ export function advise(m: AcModel, i: AcIdentity, s: AcService): AcStep[] {
 }
 
 // ------------------------------------------------------------------ getting started
-export interface AcGuideStep {
-    id: string; done: boolean; t: string; d: string;
-    link?: { label: string; route: string }; action?: 'allow-routers';
-}
-
-export function guideSteps(m: AcModel, opts: { pending: number; advisorPassed: boolean }): AcGuideStep[] {
-    const cl = clients(m);
-    const unrouted = cl.filter(i => !identityRouters(m, i).length);
-    const unenrolled = m.identities.filter(i => !i.isAdmin && !i.enrolled);
-    const hasAllPolicy = m.erPolicies.some(p => p.identityRoles.includes('#all'));
-    return [
-        { id: 'identity', done: cl.some(i => i.attrs.length > 0), t: 'Add an identity to a group',
-          d: 'Policies select groups, so give each identity a role attribute such as #staff.',
-          link: { label: 'Create identity', route: '/identities/create' } },
-        { id: 'enroll', done: m.identities.some(i => !i.isAdmin) && unenrolled.length === 0, t: 'Enroll identities and hosts',
-          d: unenrolled.length ? `${unenrolled.slice(0, 4).map(i => i.name).join(', ')}${unenrolled.length > 4 ? '…' : ''} still need their JWT or QR code enrolled in a tunneler.` : 'Each device enrolls once, with the token from its identity page.',
-          link: { label: 'Open identities', route: '/identities' } },
-        { id: 'service', done: m.services.some(s => hostsFor(m, s).length > 0), t: 'Add a service and say who hosts it',
-          d: 'Simple Service creates the service, its configs and the Bind policy in one form.',
-          link: { label: 'Open Simple Service', route: '/services/simple' } },
-        { id: 'routers', done: cl.length > 0 && unrouted.length === 0, t: 'Let identities use edge routers',
-          d: unrouted.length ? `${unrouted.length} identit${unrouted.length === 1 ? 'y has' : 'ies have'} no edge router policy. This is the step people miss most.` : 'Every identity is allowed on at least one router.',
-          action: unrouted.length && !hasAllPolicy ? 'allow-routers' : undefined },
-        { id: 'grant', done: accessSet(m).size > 0, t: 'Grant access: drag a group onto a service',
-          d: 'The canvas suggests the right policy and shows its impact before anything changes.' },
-        { id: 'apply', done: opts.pending === 0 && accessSet(m).size > 0, t: 'Apply your pending changes',
-          d: opts.pending ? `${opts.pending} change set${opts.pending === 1 ? ' is' : 's are'} waiting in Pending changes.` : 'Changes are queued first, so you can review them together.' },
-        { id: 'check', done: opts.advisorPassed, t: 'Confirm it in the advisor',
-          d: 'Pick an identity and a service. A green result means every piece is in place.' },
-    ];
-}
 
 export const CONCEPTS: Record<string, string> = {
     identities: 'An identity is a person, device or app with its own certificate. Policies select identities by role attribute (#sales), not one by one. @name picks a single identity; keep it for exceptions.',
